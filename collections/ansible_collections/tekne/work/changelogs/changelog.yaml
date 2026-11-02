@@ -1,0 +1,9 @@
+---
+ancestor: null
+releases:
+  1.0.0:
+    release_date: "2026-10-29"
+    changes:
+      release_summary: Initial tekne.work collection, split from tekne.devops.
+      major_changes:
+        - Move Kubernetes and service-platform roles out of tekne.devops.

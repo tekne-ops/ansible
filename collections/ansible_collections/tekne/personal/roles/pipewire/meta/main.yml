@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: PipeWire and WirePlumber user configuration
+  namespace: tekne
+  role_name: pipewire
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - audio
+    - pipewire
+dependencies: []

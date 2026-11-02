@@ -1,0 +1,1686 @@
+#!/usr/bin/env bash
+# arch-install.sh — Arch Linux installer with per-host profiles
+#
+# Usage (from live ISO):
+#   install/arch-install.sh              # from repo root
+#   ./arch-install.sh                    # auto-detect host
+#   ./arch-install.sh THEMIS             # force profile
+#   ./arch-install.sh --dry-run ASTER
+#   ./arch-install.sh --from-task 5 THEMIS
+#   ./arch-install.sh --vault-password-file ~/.vault_pass ASTER
+#
+# Environment:
+#   ARCH_INSTALL_VAULT_PASS_FILE  — same as --vault-password-file
+#
+# Hosts: THEMIS (server), ASTER (laptop), YUGEN (pc), KVM (VM: vda BOOT/ROOT, vdb HOME)
+
+set -euo pipefail
+
+readonly SCRIPT_NAME="${0##*/}"
+readonly VERSION="1.3.0"
+
+readonly INSTALL_ROOT="${TEKNE_INSTALL_ROOT:-/mnt}"
+readonly ANSIBLE_ROOT=/media/ansible
+readonly CHROOT_VAULT_PASS=/root/.ansible_vault_pass
+LIVE_ANSIBLE_ROOT=""
+
+DRY_RUN=${DRY_RUN:-0}
+FORCE_HOST="${FORCE_HOST:-}"
+FROM_TASK=${FROM_TASK:-0}
+SKIP_NETWORK_WAIT=${SKIP_NETWORK_WAIT:-0}
+VAULT_PASS_FILE="${VAULT_PASS_FILE:-${ARCH_INSTALL_VAULT_PASS_FILE:-}}"
+LOG_FILE="${LOG_FILE:-/var/log/arch-install.log}"
+
+# Pipeline task indices (must match run_pipeline order)
+readonly -a PIPELINE=(
+    set_ntp
+    format_nvme
+    partition
+    mkfs
+    mount
+    configure_pacman
+    pacstrap
+    configure_base
+    configure_chroot
+    run_ansible
+)
+
+# ---------------------------------------------------------------------------
+# Host profiles — install/profiles/hosts.json (via install/lib/tekne_profiles.py)
+# ---------------------------------------------------------------------------
+_arch_install_dir() {
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+load_host_profiles() {
+    local profiles_py
+    local root
+    root="$(_arch_install_dir)"
+    LIVE_ANSIBLE_ROOT="$(realpath -m "${root}/..")"
+    profiles_py="${root}/lib/tekne_profiles.py"
+    command -v python3 &>/dev/null || die "python3 required to load install profiles"
+    [[ -f "$profiles_py" ]] || die "Missing profile loader: $profiles_py"
+    # shell-init uses declare -gA / declare -gr so profile arrays persist after this function returns.
+    eval "$(python3 "$profiles_py" --shell-init)"
+}
+
+# ---------------------------------------------------------------------------
+# Logging / execution helpers
+# ---------------------------------------------------------------------------
+log() {
+    local level="$1"
+    local msg
+    shift
+    msg="[$(date -Iseconds)] [$level] $*"
+    # stderr so command substitution (e.g. host=$(detect_host KVM)) stays clean
+    echo "$msg" | tee -a "$LOG_FILE" >&2
+}
+
+run() {
+    local cmd_str
+    printf -v cmd_str '%q ' "$@"
+    if ((DRY_RUN)); then
+        log DRY-RUN "${cmd_str% }"
+    else
+        log RUN "${cmd_str% }"
+        "$@"
+    fi
+}
+
+# Run a command in the install root: arch-chroot MNT CMD [ARGS...]
+chroot_run() {
+    run arch-chroot "$1" "${@:2}"
+}
+
+# Run bash -c SCRIPT in the install root (redirects, globs, ||, etc.).
+chroot_bash() {
+    run arch-chroot "$1" bash -c "$2"
+}
+
+die() {
+    log ERROR "$*"
+    exit 1
+}
+
+load_host_profiles
+
+require_root() {
+    [[ $EUID -eq 0 ]] || die "Run as root (e.g. from Arch live ISO)."
+}
+
+require_live_cmds() {
+    local missing=() cmd
+    for cmd in nvme parted mkfs.vfat mount pacman pacstrap genfstab reflector rsync \
+        arch-chroot efibootmgr timedatectl partprobe curl ping repo-add; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    ((${#missing[@]} == 0)) || die "Missing live ISO commands: ${missing[*]}"
+}
+
+require_mounted() {
+    local mnt="${1:-$INSTALL_ROOT}"
+    if ((DRY_RUN)); then
+        log DRY-RUN "require_mounted: $mnt (check skipped)"
+        return 0
+    fi
+    mountpoint -q "$mnt" || die "Root not mounted at $mnt — run task_mount first"
+}
+
+require_chroot_ready() {
+    local mnt="${1:-$INSTALL_ROOT}"
+    require_mounted "$mnt"
+    if ((DRY_RUN)); then
+        log DRY-RUN "require_chroot_ready: $mnt (check skipped)"
+        return 0
+    fi
+    [[ -d "$mnt/etc" ]] || die "Chroot not installed at $mnt — run task_pacstrap first"
+}
+
+# Arch has no /usr/bin/command (coreutils); lookup must run in bash, not via arch-chroot CMD.
+chroot_has_cmd() {
+    local mnt="$1" cmd="$2"
+    if ((DRY_RUN)); then
+        return 0
+    fi
+    chroot_bash "$mnt" "command -v '$cmd' >/dev/null 2>&1"
+}
+
+require_chroot_cmds() {
+    local mnt="${1:-$INSTALL_ROOT}"
+    local missing=() cmd
+    if ((DRY_RUN)); then
+        return 0
+    fi
+    for cmd in git ansible-playbook ansible-galaxy ansible-vault mkinitcpio locale-gen; do
+        chroot_has_cmd "$mnt" "$cmd" || missing+=("$cmd")
+    done
+    ((${#missing[@]} == 0)) || die "Missing commands in chroot: ${missing[*]}"
+}
+
+network_is_up() {
+    local target
+    for target in 1.1.1.1 9.9.9.9 8.8.8.8; do
+        if ping -c1 -W3 "$target" &>/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+live_bring_up_network() {
+    log INFO "Starting live ISO network services (systemd-networkd, iwd)..."
+    systemctl start systemd-networkd.service 2>/dev/null || true
+    systemctl start systemd-resolved.service 2>/dev/null || true
+    systemctl start iwd.service 2>/dev/null || true
+    sleep 3
+}
+
+log_network_diagnostics() {
+    local line
+    log ERROR "Network diagnostics (connect WiFi/Ethernet on the live ISO):"
+    while IFS= read -r line; do
+        log ERROR "  ${line}"
+    done < <(ip -br link 2>/dev/null || true)
+    while IFS= read -r line; do
+        log ERROR "  route: ${line}"
+    done < <(ip route 2>/dev/null || true)
+    if command -v resolvectl &>/dev/null; then
+        while IFS= read -r line; do
+            log ERROR "  ${line}"
+        done < <(resolvectl status 2>/dev/null | head -15 || true)
+    fi
+    log ERROR "  Try: iwctl station <iface> connect esher --passphrase '<pass>'"
+    log ERROR "  Or re-run with --skip-network-wait after connecting manually."
+}
+
+live_wifi_iface() {
+    local path
+    for path in /sys/class/net/wl*; do
+        if [[ -e "$path" ]]; then
+            basename "$path"
+            return 0
+        fi
+    done
+    return 0
+}
+
+live_has_ethernet_carrier() {
+    local path carrier
+    for path in /sys/class/net/en* /sys/class/net/eth*; do
+        [[ -e "$path" ]] || continue
+        carrier="$(cat "${path}/carrier" 2>/dev/null || echo 0)"
+        [[ "$carrier" == "1" ]] && return 0
+    done
+    return 1
+}
+
+resolve_wifi_passphrase() {
+    local ssid="${TEKNE_WIFI_SSID:-esher}"
+    local vault_file pass
+
+    if [[ -n "${TEKNE_WIFI_PASSPHRASE:-}" ]]; then
+        printf '%s' "$TEKNE_WIFI_PASSPHRASE"
+        return 0
+    fi
+
+    vault_file="$(_arch_install_dir)/../inventories/personal/group_vars/all/vault.yml"
+    if [[ -n "$VAULT_PASS_FILE" && -r "$VAULT_PASS_FILE" && -f "$vault_file" ]] &&
+        command -v ansible-vault &>/dev/null; then
+        pass="$(ansible-vault view "$vault_file" --vault-password-file "$VAULT_PASS_FILE" 2>/dev/null |
+            awk -F: '/^os_wifi_passphrase:/ {
+          sub(/^[^:]*:[[:space:]]*/, "")
+          gsub(/^["'\''"]|["'\''"]$/, "")
+          print
+          exit
+        }')" || true
+        if [[ -n "$pass" ]]; then
+            printf '%s' "$pass"
+            return 0
+        fi
+    fi
+
+    if [[ -t 0 ]]; then
+        read -rs -p "WiFi passphrase for ${ssid}: " pass
+        echo >&2
+        if [[ -n "$pass" ]]; then
+            printf '%s' "$pass"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+connect_wifi_live() {
+    local host="$1"
+    local ssid iface pass attempt max_attempts=6
+
+    [[ "$host" == ASTER ]] || return 0
+    network_is_up && return 0
+
+    ssid="${TEKNE_WIFI_SSID:-esher}"
+    iface="$(live_wifi_iface)"
+    if live_has_ethernet_carrier; then
+        log INFO "Ethernet link up; skipping WiFi connect (waiting for DHCP/routing)."
+        return 0
+    fi
+    if [[ -z "$iface" ]]; then
+        log WARN "ASTER: no WiFi interface (wl*) found — connect Ethernet or WiFi manually (nmtui/iwctl)."
+        return 0
+    fi
+    command -v iwctl &>/dev/null || {
+        log WARN "iwctl not found — connect WiFi manually before continuing."
+        return 0
+    }
+
+    log INFO "ASTER: bringing up WiFi (${ssid} on ${iface})..."
+    systemctl is-active --quiet iwd 2>/dev/null || systemctl start iwd 2>/dev/null || true
+    sleep 2
+
+    pass="$(resolve_wifi_passphrase)" || pass=""
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        if [[ -n "$pass" ]]; then
+            if iwctl station "$iface" connect "$ssid" --passphrase "$pass" &>/dev/null; then
+                log INFO "WiFi connect initiated (attempt ${attempt}/${max_attempts})."
+                sleep 5
+                network_is_up && return 0
+            fi
+        elif iwctl station "$iface" connect "$ssid" &>/dev/null; then
+            log INFO "WiFi connect initiated without passphrase (attempt ${attempt}/${max_attempts})."
+            sleep 5
+            network_is_up && return 0
+        fi
+        log INFO "  WiFi attempt ${attempt}/${max_attempts} failed, retrying in 5s..."
+        sleep 5
+    done
+    log WARN "WiFi connect failed after ${max_attempts} attempts; wait_for_network may still fail."
+}
+
+ensure_live_network() {
+    local host="$1"
+
+    if ((DRY_RUN || SKIP_NETWORK_WAIT)); then
+        log DRY-RUN "ensure_live_network (skipped)"
+        return 0
+    fi
+    if network_is_up; then
+        log INFO "Network already up."
+        export TEKNE_NETWORK_LIVE_OK=1
+        return 0
+    fi
+    live_bring_up_network
+    connect_wifi_live "$host"
+    wait_for_network
+    export TEKNE_NETWORK_LIVE_OK=1
+}
+
+wait_for_network() {
+    local tries="${NETWORK_WAIT_ATTEMPTS:-30}" i
+    if ((DRY_RUN || SKIP_NETWORK_WAIT)); then
+        log DRY-RUN "wait_for_network (skipped)"
+        return 0
+    fi
+    if [[ "${TEKNE_NETWORK_LIVE_OK:-0}" == 1 ]] && network_is_up; then
+        return 0
+    fi
+    log INFO "Waiting for network connectivity..."
+    for ((i = 1; i <= tries; i++)); do
+        if network_is_up; then
+            log INFO "Network is up (attempt ${i}/${tries})."
+            export TEKNE_NETWORK_LIVE_OK=1
+            return 0
+        fi
+        log INFO "  attempt ${i}/${tries}: no IP connectivity yet (check WiFi/Ethernet)..."
+        sleep 2
+    done
+    log_network_diagnostics
+    die "Network unavailable after ${tries} attempts (~$((tries * 2))s). Connect on the live ISO, or re-run with --skip-network-wait."
+}
+
+# Copy vault password file into chroot (live-ISO paths are not visible in arch-chroot).
+chroot_stage_vault_pass() {
+    local mnt="$1"
+    if [[ -z "$VAULT_PASS_FILE" ]]; then
+        return 0
+    fi
+    log INFO "Staging vault password file at ${CHROOT_VAULT_PASS} in chroot..."
+    run mkdir -p "$mnt/root"
+    run chmod 700 "$mnt/root"
+    run cp "$VAULT_PASS_FILE" "$mnt${CHROOT_VAULT_PASS}"
+    run chmod 600 "$mnt${CHROOT_VAULT_PASS}"
+}
+
+chroot_cleanup_vault_pass() {
+    local mnt="$1"
+    if [[ -z "$VAULT_PASS_FILE" ]]; then
+        return 0
+    fi
+    run rm -f "$mnt${CHROOT_VAULT_PASS}"
+}
+
+cleanup_install_resources() {
+    local status=$?
+    trap - EXIT INT TERM
+    if ((DRY_RUN)); then
+        exit "$status"
+    fi
+
+    # Unwind temporary install-only mounts in reverse dependency order.
+    local path
+    for path in \
+        "$INSTALL_ROOT/sys/firmware/efi/efivars" \
+        "$INSTALL_ROOT/var/cache/build" \
+        "$INSTALL_ROOT/var/cache/staging" \
+        "$INSTALL_ROOT/var/cache/docker/build" \
+        "$INSTALL_ROOT/var/cache/pacman/pkg" \
+        "$INSTALL_ROOT/tmp"; do
+        if mountpoint -q "$path" 2>/dev/null; then
+            umount "$path" 2>/dev/null || log WARN "Could not unmount temporary path: $path"
+        fi
+    done
+
+    if [[ -n "$VAULT_PASS_FILE" ]]; then
+        rm -f "$INSTALL_ROOT${CHROOT_VAULT_PASS}"
+    fi
+    exit "$status"
+}
+
+# efibootmgr needs host NVRAM inside the install chroot (Arch wiki install guide).
+chroot_mount_efivars() {
+    local mnt="$1"
+    if ((DRY_RUN)); then
+        log DRY-RUN "mount --bind /sys/firmware/efi/efivars ${mnt}/sys/firmware/efi/efivars"
+        return 0
+    fi
+    [[ -d /sys/firmware/efi/efivars ]] || {
+        log WARN "Host efivars not available; efibootmgr may not persist boot entries"
+        return 0
+    }
+    run mkdir -p "$mnt/sys/firmware/efi/efivars"
+    if mountpoint -q "$mnt/sys/firmware/efi/efivars"; then
+        return 0
+    fi
+    run mount --bind /sys/firmware/efi/efivars "$mnt/sys/firmware/efi/efivars"
+}
+
+chroot_umount_efivars() {
+    local mnt="$1"
+    if ((DRY_RUN)); then
+        log DRY-RUN "umount ${mnt}/sys/firmware/efi/efivars (if mounted)"
+        return 0
+    fi
+    if mountpoint -q "$mnt/sys/firmware/efi/efivars"; then
+        run umount "$mnt/sys/firmware/efi/efivars"
+    fi
+}
+
+# Keep the firmware manufacturer logo (ACPI BGRT) on the screen for boot and for
+# poweroff/reboot. quiet alone preserves the logo only until the first console
+# switch; shutdown opens the text console unless Plymouth redraws that logo.
+configure_plymouth_splash() {
+    local mnt="$1"
+
+    if ((DRY_RUN)); then
+        log DRY-RUN "set plymouth theme bgrt in chroot"
+        log DRY-RUN "add plymouth to mkinitcpio HOOKS before filesystems"
+        return 0
+    fi
+
+    chroot_bash "$mnt" '
+        set -euo pipefail
+        hooks=$(grep "^HOOKS=" /etc/mkinitcpio.conf || true)
+        case "$hooks" in
+            *plymouth*) ;;
+            *filesystems*)
+                sed -i "s/[[:space:]]filesystems/ plymouth filesystems/" /etc/mkinitcpio.conf
+                ;;
+            *kms*)
+                sed -i "s/[[:space:]]kms/ kms plymouth/" /etc/mkinitcpio.conf
+                ;;
+            *)
+                sed -i "s/^HOOKS=(/HOOKS=(plymouth /" /etc/mkinitcpio.conf
+                ;;
+        esac
+        plymouth-set-default-theme bgrt
+    '
+}
+
+# Regenerate UKI + EFI boot entry. Must run after Ansible: pacman installs in chroot
+# (e.g. xfce4 on ASTER) trigger mkinitcpio hooks and leave the UKI/ESP out of sync
+# if boot was configured earlier in the pipeline.
+configure_uki_boot() {
+    local host="$1"
+    local mnt="$2"
+    local kernel="${HOST_KERNEL[$host]}"
+    local kernel_pkg boot_disk uki_efi params_line
+
+    kernel_pkg="linux${kernel}"
+    uki_efi="arch-${kernel_pkg}.efi"
+    boot_disk="$(host_disk_path "$host" 0)"
+    params_line="${HOST_KERNEL_CMDLINE[$host]}${HOST_EFI_INTEL[$host]}${HOST_EFI_EXTRA[$host]}"
+
+    log INFO "=== Finalize UKI boot (post-Ansible): boot_disk=$boot_disk kernel=${kernel_pkg} uki=${uki_efi} ==="
+
+    if [[ "$host" == ASTER ]]; then
+        log INFO "Ensuring MODULES=(mt7925e btusb) in mkinitcpio.conf for ASTER..."
+        if ((DRY_RUN)); then
+            log DRY-RUN "update mkinitcpio.conf MODULES=(mt7925e btusb) in chroot"
+        else
+            chroot_run "$mnt" sed -i 's/^MODULES=.*/MODULES=(mt7925e btusb)/' /etc/mkinitcpio.conf
+            chroot_bash "$mnt" "grep -q 'MODULES=(mt7925e btusb)' /etc/mkinitcpio.conf || echo 'MODULES=(mt7925e btusb)' >> /etc/mkinitcpio.conf"
+        fi
+    fi
+
+    configure_plymouth_splash "$mnt"
+
+    if ((DRY_RUN)); then
+        log DRY-RUN "mkdir -p $mnt/etc/cmdline.d $mnt/boot/EFI/Linux"
+        log DRY-RUN "write $mnt/etc/cmdline.d/params.conf"
+        log DRY-RUN "write $mnt/etc/cmdline.d/root.conf"
+        log DRY-RUN "write $mnt/etc/mkinitcpio.d/${kernel_pkg}.preset"
+        log DRY-RUN "mkinitcpio -p ${kernel_pkg} (in chroot)"
+        log DRY-RUN "efibootmgr --disk $boot_disk --part 1 --create --label BOOT --loader \\EFI\\Linux\\${uki_efi} --unicode"
+        return 0
+    fi
+
+    run mkdir -p "$mnt/etc/cmdline.d" "$mnt/boot/EFI/Linux"
+
+    cat >"$mnt/etc/cmdline.d/params.conf" <<EOF
+${params_line}
+EOF
+
+    cat >"$mnt/etc/cmdline.d/root.conf" <<EOF
+root=LABEL=ROOT rw initrd=\\intel-ucode.img initrd=\\initramfs-${kernel_pkg}.img
+EOF
+
+    cat >"$mnt/etc/mkinitcpio.d/${kernel_pkg}.preset" <<EOF
+ALL_kver="/boot/vmlinuz-${kernel_pkg}"
+PRESETS=('default')
+default_uki="/boot/EFI/Linux/${uki_efi}"
+EOF
+
+    chroot_run "$mnt" mkinitcpio -p "${kernel_pkg}"
+
+    chroot_mount_efivars "$mnt"
+    # Expansion is intentionally deferred to the shell inside the chroot.
+    # shellcheck disable=SC2016
+    chroot_bash "$mnt" '
+    bootnum=""
+    while IFS= read -r line; do
+      case "$line" in
+        Boot[0-9]*\ *BOOT\ *)
+          bootnum="${line#Boot}"
+          bootnum="${bootnum%%*}"
+          efibootmgr -B -b "$bootnum" 2>/dev/null || true
+          ;;
+      esac
+    done < <(efibootmgr 2>/dev/null || true)
+  '
+    chroot_run "$mnt" efibootmgr \
+        --create \
+        --disk "$boot_disk" \
+        --part 1 \
+        --label BOOT \
+        --loader "\\EFI\\Linux\\${uki_efi}" \
+        --unicode
+    chroot_umount_efivars "$mnt"
+}
+
+# Stage the exact installer checkout into the target. This keeps the chroot on the
+# same revision as the live-ISO process and avoids a GitHub dependency mid-install.
+stage_ansible_sources() {
+    local mnt="$1"
+
+    [[ -f "${LIVE_ANSIBLE_ROOT}/collections/ansible_collections/tekne/common/galaxy.yml" ]] ||
+        die "Missing tekne.common collection under ${LIVE_ANSIBLE_ROOT}"
+
+    chroot_run "$mnt" mkdir -p /media
+
+    log INFO "Staging ansible checkout into chroot..."
+    run mkdir -p "${mnt}${ANSIBLE_ROOT}"
+    run rsync -a --delete \
+        --exclude .git \
+        --exclude .ansible \
+        --exclude __pycache__ \
+        "${LIVE_ANSIBLE_ROOT}/" "${mnt}${ANSIBLE_ROOT}/"
+}
+
+# Third-party collections install into the first collections_path entry
+# (.ansible/collections). tekne.common, tekne.personal, and tekne.work stay
+# in the staged source tree.
+chroot_install_ansible_collections() {
+    local mnt="$1"
+    local coll_src="${ANSIBLE_ROOT}/collections/ansible_collections/tekne/common"
+    local user_role="${coll_src}/roles/user"
+
+    if ((DRY_RUN)); then
+        log DRY-RUN "require ${coll_src}/galaxy.yml and install third-party collections from requirements.yml"
+        return 0
+    fi
+
+    [[ -f "${mnt}${coll_src}/galaxy.yml" ]] ||
+        die "Collection not found at ${coll_src}/galaxy.yml"
+
+    log INFO "Installing third-party Ansible collections from requirements.yml..."
+    chroot_run "$mnt" env ANSIBLE_CONFIG="${ANSIBLE_ROOT}/ansible.cfg" \
+        ansible-galaxy collection install -r "${ANSIBLE_ROOT}/requirements.yml"
+
+    [[ -f "${mnt}${user_role}/tasks/main.yml" ]] ||
+        die "tekne.common.user not found at ${user_role}"
+
+    log INFO "Collections OK: tekne.common.user at ${user_role}"
+}
+
+# Decrypt vault and verify keys required for this host (needs staged vault password file).
+require_vault_vars() {
+    local host="$1"
+    local mnt="$2"
+    local vault_file="${ANSIBLE_ROOT}/inventories/personal/group_vars/all/vault.yml"
+    local content
+
+    if ((DRY_RUN)); then
+        log DRY-RUN "require_vault_vars: decrypt ${vault_file} and check user_password$(
+            [[ "$host" == THEMIS ]] && printf ' + git_token'
+        )"
+        return 0
+    fi
+
+    if [[ -z "$VAULT_PASS_FILE" ]]; then
+        log WARN "Vault preflight skipped (--ask-vault-pass); use --vault-password-file to validate secrets before ansible runs"
+        return 0
+    fi
+
+    log INFO "Preflight: validating vault secrets for ${host}..."
+    if ! content="$(arch-chroot "$mnt" ansible-vault view "$vault_file" \
+        --vault-password-file "$CHROOT_VAULT_PASS" 2>&1)"; then
+        die "Vault decrypt failed: ${content}"
+    fi
+
+    if ! grep -qE '^user_password:' <<<"$content"; then
+        die "Vault missing user_password (required for --tags user)"
+    fi
+    if ! grep -qE '^user_password: +[^[:space:]]' <<<"$content"; then
+        die "Vault user_password is empty (required for --tags user)"
+    fi
+
+    if [[ "$host" == THEMIS ]]; then
+        if ! grep -qE '^git_token:' <<<"$content"; then
+            die "Vault missing git_token (required for THEMIS --tags os)"
+        fi
+        if ! grep -qE '^git_token: +[^[:space:]]' <<<"$content"; then
+            die "Vault git_token is empty (required for THEMIS --tags os)"
+        fi
+    fi
+
+    log INFO "Vault preflight OK"
+}
+
+ansible_chroot_playbook() {
+    local mnt="$1" host="$2" tags="$3"
+    shift 3
+    local playbook inventory
+
+    case "$host" in
+        THEMIS)
+            playbook="${ANSIBLE_ROOT}/playbooks/personal/server.yml"
+            inventory="${ANSIBLE_ROOT}/inventories/personal/hosts.yml"
+            ;;
+        ASTER | YUGEN | KVM)
+            playbook="${ANSIBLE_ROOT}/playbooks/personal/workstation.yml"
+            inventory="${ANSIBLE_ROOT}/inventories/personal/hosts.yml"
+            ;;
+        *)
+            die "No Ansible entrypoint for host ${host}"
+            ;;
+    esac
+
+    chroot_run "$mnt" env ANSIBLE_CONFIG="${ANSIBLE_ROOT}/ansible.cfg" \
+        ansible-playbook "$playbook" \
+        -i "$inventory" \
+        --tags "$tags" \
+        "$@"
+}
+
+partprobe_host() {
+    local host="$1"
+    local -a disks=(
+        "$(host_disk_path "$host" 0)"
+        "$(host_disk_path "$host" 1)"
+    )
+    if host_has_disk2 "$host"; then
+        disks+=("$(host_disk_path "$host" 2)")
+    fi
+    # A failed rescan must not abort the install. parted has already told the
+    # kernel about the partitions it just wrote.
+    run partprobe "${disks[@]}" || true
+}
+
+host_slug() {
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+themis_cache_bind_mounts() {
+    local mnt="$1"
+    local -a binds=(
+        /mnt/cache/tmp:/tmp
+        /mnt/cache/pacman:/var/cache/pacman/pkg
+        /mnt/cache/docker-build:/var/cache/docker/build
+        /mnt/cache/staging:/var/cache/staging
+        /mnt/cache/build:/var/cache/build
+    )
+    local pair src dst host_src host_dst
+    if ((! DRY_RUN)); then
+        if [[ -d "${mnt}/mnt/cache" ]]; then
+            chroot_run "$mnt" mkdir -p \
+                /mnt/cache/tmp \
+                /mnt/cache/pacman \
+                /mnt/cache/docker-build \
+                /mnt/cache/staging \
+                /mnt/cache/build
+        else
+            log WARN "THEMIS: /mnt/cache not mounted; skip cache bind mounts (add disk2 in hosts.json)"
+            return 0
+        fi
+    fi
+    for pair in "${binds[@]}"; do
+        src="${pair%%:*}"
+        dst="${pair##*:}"
+        host_src="${mnt}${src}"
+        host_dst="${mnt}${dst}"
+        if ((DRY_RUN)); then
+            log DRY-RUN "mount --bind $host_src $host_dst"
+            continue
+        fi
+        if [[ -d "$host_src" ]]; then
+            mkdir -p "$host_dst"
+            if ! mountpoint -q "$host_dst"; then
+                run mount --bind "$host_src" "$host_dst"
+            fi
+        else
+            log WARN "THEMIS: $src not found in chroot; skipping bind mount to $dst"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Host detection
+# ---------------------------------------------------------------------------
+detect_host() {
+    local hint="${1:-}"
+
+    if [[ -n "$hint" ]]; then
+        log INFO "Using forced host profile: $hint"
+        echo "$hint"
+        return
+    fi
+
+    local product board hn name
+    product="$(tr '[:lower:]' '[:upper:]' </sys/class/dmi/id/product_name 2>/dev/null || true)"
+    board="$(tr '[:lower:]' '[:upper:]' </sys/class/dmi/id/board_name 2>/dev/null || true)"
+    hn="$(tr '[:lower:]' '[:upper:]' </etc/hostname 2>/dev/null || hostname 2>/dev/null | tr '[:lower:]' '[:upper:]' || true)"
+
+    for name in "${VALID_HOSTS[@]}"; do
+        if [[ "$hn" == "$name" ]]; then
+            log INFO "Detected host $name (exact hostname match)"
+            echo "$name"
+            return
+        fi
+    done
+    for name in "${VALID_HOSTS[@]}"; do
+        if [[ "$product" == *"$name"* || "$board" == *"$name"* ]]; then
+            log INFO "Detected host $name (DMI product=$product board=$board)"
+            echo "$name"
+            return
+        fi
+    done
+
+    log WARN "Could not detect host (product=$product board=$board hostname=$hn)"
+    echo ""
+}
+
+validate_host() {
+    local host="$1"
+    [[ -v "HOST_ROLE[$host]" ]] || die "Unknown host '$host'. Valid: ${VALID_HOSTS[*]}"
+}
+
+host_banner() {
+    local host="$1"
+    log INFO "Profile: $host (${HOST_ROLE[$host]})"
+    log INFO "Disk0 (BOOT/ROOT): $(host_disk_path "$host" 0)  Disk1 (${HOST_DISK1_LAYOUT[$host]}): $(host_disk_path "$host" 1)"
+    if host_has_disk2 "$host"; then
+        log INFO "Disk2 (${HOST_DISK2_LAYOUT[$host]}): $(host_disk_path "$host" 2) -> ${HOST_DISK2_MOUNT[$host]}"
+    fi
+    log INFO "Storage: ${HOST_STORAGE_KIND[$host]} | Kernel: linux${HOST_KERNEL[$host]}"
+    local fs_line="Filesystems: BOOT=vfat ROOT=${HOST_ROOT_FSTYPE[$host]} disk1=${HOST_DISK1_FSTYPE[$host]}"
+    if host_has_disk2 "$host"; then
+        fs_line+=" disk2=${HOST_DISK2_FSTYPE[$host]}"
+    fi
+    log INFO "$fs_line"
+}
+
+host_has_disk2() {
+    local host="$1"
+    [[ -n "${HOST_DISK2[$host]:-}" ]]
+}
+
+# NVMe namespace device (e.g. /dev/nvme0 -> /dev/nvme0n1)
+nvme_ns() {
+    local ctrl="$1"
+    echo "${ctrl}n1"
+}
+
+# Controller path is a char device (/dev/nvme0); namespace is block (/dev/nvme0n1).
+nvme_ctrl_exists() {
+    local ctrl="$1"
+    [[ -c "$ctrl" || -b "$ctrl" ]] && return 0
+    [[ -b "$(nvme_ns "$ctrl")" ]] && return 0
+    return 1
+}
+
+# Whole disk path for parted (nvme namespace or virtio disk)
+host_disk_path() {
+    local host="$1" disk_idx="$2"
+    local ctrl
+    if [[ "$disk_idx" == 0 ]]; then
+        # shellcheck disable=SC2153 # generated dynamically by tekne_profiles.py
+        ctrl="${HOST_DISK0[$host]}"
+    elif [[ "$disk_idx" == 1 ]]; then
+        # shellcheck disable=SC2153 # generated dynamically by tekne_profiles.py
+        ctrl="${HOST_DISK1[$host]}"
+    else
+        ctrl="${HOST_DISK2[$host]}"
+    fi
+    if [[ "${HOST_STORAGE_KIND[$host]}" == nvme ]]; then
+        nvme_ns "$ctrl"
+    else
+        echo "$ctrl"
+    fi
+}
+
+# Create a labeled filesystem. f2fs keeps the shared feature flags; ext4 and xfs are forced.
+mkfs_labeled() {
+    local fstype="$1" label="$2" dev="$3"
+    case "$fstype" in
+        f2fs)
+            # shellcheck disable=SC2086
+            run /usr/bin/mkfs.f2fs -l "$label" -i $F2FS_MKFS_OPTS "$dev"
+            ;;
+        ext4)
+            # 4096-byte blocks match NVMe page alignment. 1% reserved keeps
+            # emergency space for root without the 5% default on a large disk.
+            run /usr/bin/mkfs.ext4 -F -L "$label" -b 4096 -m 1 "$dev"
+            ;;
+        xfs)
+            # Force a 4 KiB filesystem sector even when the namespace still
+            # reports 512-byte LBAs. This does not change the drive's LBA format.
+            run /usr/bin/mkfs.xfs -f -L "$label" -s size=4096 "$dev"
+            ;;
+        *)
+            die "Unsupported filesystem '$fstype'"
+            ;;
+    esac
+}
+
+# Mount options for the installed root and data filesystems. /boot stays a plain vfat mount.
+mount_fs() {
+    local fstype="$1" dev="$2" mnt="$3"
+    case "$fstype" in
+        f2fs) run /usr/bin/mount -o "$F2FS_MNT_OPTS" "$dev" "$mnt" ;;
+        ext4 | xfs) run /usr/bin/mount -o noatime "$dev" "$mnt" ;;
+        *) die "Unsupported filesystem '$fstype'" ;;
+    esac
+}
+
+ensure_mkfs_tool() {
+    local fstype="$1" cmd pkg
+    case "$fstype" in
+        f2fs) cmd=mkfs.f2fs pkg=f2fs-tools ;;
+        ext4) cmd=mkfs.ext4 pkg=e2fsprogs ;;
+        xfs) cmd=mkfs.xfs pkg=xfsprogs ;;
+        *) die "Unsupported filesystem '$fstype'" ;;
+    esac
+    if command -v "$cmd" >/dev/null 2>&1; then
+        return 0
+    fi
+    if ((DRY_RUN)); then
+        log DRY-RUN "pacman -Sy --needed --noconfirm $pkg"
+        return 0
+    fi
+    log INFO "Installing $pkg so $cmd is available on the live ISO..."
+    run pacman -Sy --needed --noconfirm "$pkg"
+    command -v "$cmd" >/dev/null 2>&1 || die "Missing $cmd after installing $pkg"
+}
+
+# parted start position from a profile offset in MiB. 0 means the beginning of the disk.
+parted_start() {
+    local mib="$1"
+    if [[ "$mib" == 0 ]]; then
+        echo "0%"
+    else
+        echo "${mib}MiB"
+    fi
+}
+
+# End of the last partition on a disk. A MiB offset from the end keeps the
+# backup GPT and the partition size on an IEC boundary; 100% does not.
+parted_tail_end() {
+    if [[ "${GPT_TAIL_RESERVE_MIB}" == 0 ]]; then
+        echo "100%"
+    else
+        echo "-${GPT_TAIL_RESERVE_MIB}MiB"
+    fi
+}
+
+# Volume label for disk1. home, games, and docker are the layouts this installer creates.
+disk1_volname() {
+    case "${HOST_DISK1_LAYOUT[$1]}" in
+        home) echo HOME ;;
+        games) echo GAMES ;;
+        docker) echo DOCKER ;;
+        *) echo "" ;;
+    esac
+}
+
+# Partition path (e.g. nvme0n1p1 or vda1)
+host_part_path() {
+    local host="$1" disk_idx="$2" partnum="$3"
+    local disk
+    disk="$(host_disk_path "$host" "$disk_idx")"
+    if [[ "${HOST_STORAGE_KIND[$host]}" == nvme ]]; then
+        echo "${disk}p${partnum}"
+    else
+        echo "${disk}${partnum}"
+    fi
+}
+
+# Show the drive's LBA formats before erase. Sector size stays unchanged
+# unless the host profile sets disk0_lbaf, disk1_lbaf, or disk2_lbaf.
+report_nvme_lba() {
+    local ctrl="$1"
+    local ns
+    ns="$(nvme_ns "$ctrl")"
+    if ((DRY_RUN)); then
+        log DRY-RUN "nvme id-ns -H ${ns} (LBA formats; unchanged unless diskN_lbaf is set)"
+        log DRY-RUN "nvme id-ctrl -H ${ctrl} (Format NVM and firmware)"
+        return 0
+    fi
+    if ! nvme_ctrl_exists "$ctrl"; then
+        log WARN "NVMe LBA report skipped; controller not present: $ctrl"
+        return 0
+    fi
+    log INFO "NVMe LBA formats for ${ns} (kept unless diskN_lbaf is set):"
+    nvme id-ns -H "$ns" | grep -E 'LBA Format|Relative Performance|in use' \
+        || log WARN "No LBA format lines from nvme id-ns ${ns}"
+    log INFO "NVMe controller ${ctrl}:"
+    nvme id-ctrl -H "$ctrl" | grep -E 'Format NVM|Firmware Slots|Firmware Slot' \
+        || log WARN "No firmware or Format NVM lines from nvme id-ctrl ${ctrl}"
+}
+
+report_host_nvme_lba() {
+    local host="$1"
+    if [[ "${HOST_STORAGE_KIND[$host]}" != nvme ]]; then
+        return 0
+    fi
+    log INFO "=== NVMe LBA preflight (sector size changes only when diskN_lbaf is set) ==="
+    report_nvme_lba "${HOST_DISK0[$host]}"
+    report_nvme_lba "${HOST_DISK1[$host]}"
+    if host_has_disk2 "$host"; then
+        report_nvme_lba "${HOST_DISK2[$host]}"
+    fi
+}
+
+confirm_destroy() {
+    local host="$1"
+    echo
+    echo "================================================================"
+    echo "  DESTRUCTIVE INSTALL — host: $host (${HOST_ROLE[$host]})"
+    echo "  This will ERASE (NVMe user-data erase) and repartition ALL data on:"
+    echo "    Disk0: $(host_disk_path "$host" 0) (BOOT + ROOT)"
+    echo "    Disk1: $(host_disk_path "$host" 1) (${HOST_DISK1_LAYOUT[$host]})"
+    if host_has_disk2 "$host"; then
+        echo "    Disk2: $(host_disk_path "$host" 2) (${HOST_DISK2_LAYOUT[$host]} -> ${HOST_DISK2_MOUNT[$host]})"
+    fi
+    echo "  Kernel package: linux${HOST_KERNEL[$host]}"
+    echo "  Microcode/GPU stack: ${HOST_MCODE[$host]}"
+    echo "  Final partitions end ${GPT_TAIL_RESERVE_MIB} MiB before the disk end."
+    echo "================================================================"
+    echo
+    report_host_nvme_lba "$host"
+    if ((DRY_RUN)); then
+        log INFO "Dry-run mode — no changes will be made."
+        return 0
+    fi
+    read -r -p "Type the host name ($host) to continue: " ans
+    [[ "$ans" == "$host" ]] || die "Aborted."
+}
+
+# ---------------------------------------------------------------------------
+# Task 0 — Enable NTP (before destructive disk work)
+# ---------------------------------------------------------------------------
+task_set_ntp() {
+    log INFO "=== Task 0: timedatectl / enable NTP ==="
+    run timedatectl
+    run timedatectl set-ntp true
+    wait_for_ntp_sync
+}
+
+wait_for_ntp_sync() {
+    local attempt
+    if ((DRY_RUN)); then
+        log DRY-RUN "wait up to 30 seconds for timedatectl NTPSynchronized=yes"
+        return 0
+    fi
+
+    for ((attempt = 1; attempt <= 30; attempt++)); do
+        if [[ "$(timedatectl show --property=NTPSynchronized --value 2>/dev/null)" == yes ]]; then
+            log INFO "System clock synchronized by NTP."
+            return 0
+        fi
+        sleep 1
+    done
+    timedatectl status >&2 || true
+    die "NTP did not synchronize within 30 seconds; package signatures cannot be validated safely"
+}
+
+# ---------------------------------------------------------------------------
+# Task 1 — NVMe user-data erase
+# ---------------------------------------------------------------------------
+task_format_nvme() {
+    local host="$1"
+    local ctrl0="${HOST_DISK0[$host]}"
+    local ctrl1="${HOST_DISK1[$host]}"
+    local -a ctrls=("$ctrl0" "$ctrl1")
+
+    if host_has_disk2 "$host"; then
+        ctrls+=("${HOST_DISK2[$host]}")
+    fi
+
+    if [[ "${HOST_STORAGE_KIND[$host]}" == virt ]]; then
+        log INFO "=== Task 1: skip NVMe secure erase (virtio: ${ctrl0}, ${ctrl1}) ==="
+        partprobe_host "$host"
+        return 0
+    fi
+
+    log INFO "=== Task 1: NVMe format (ses=1 user-data erase) ==="
+    if ((FROM_TASK != 0)); then
+        report_host_nvme_lba "$host"
+    fi
+
+    for ctrl in "${ctrls[@]}"; do
+        if ((! DRY_RUN)); then
+            nvme_ctrl_exists "$ctrl" || die "NVMe controller not found: $ctrl (expected char device; namespace: $(nvme_ns "$ctrl"))"
+        fi
+        local -a format_args=(--namespace-id=1 --ses=1 --reset --force)
+        local lbaf=""
+        if [[ "$ctrl" == "$ctrl0" ]]; then
+            lbaf="${HOST_DISK0_LBAF[$host]:-}"
+        elif [[ "$ctrl" == "$ctrl1" ]]; then
+            lbaf="${HOST_DISK1_LBAF[$host]:-}"
+        elif host_has_disk2 "$host" && [[ "$ctrl" == "${HOST_DISK2[$host]}" ]]; then
+            lbaf="${HOST_DISK2_LBAF[$host]:-}"
+        fi
+        if [[ -n "$lbaf" ]]; then
+            log WARN "Explicit LBA format ${lbaf} for ${ctrl}; format will change the sector size and erase the namespace"
+            format_args+=(--lbaf="$lbaf")
+        fi
+        run nvme format "$ctrl" "${format_args[@]}"
+    done
+    partprobe_host "$host"
+}
+
+# ---------------------------------------------------------------------------
+# Task 2 — Partition disks
+# ---------------------------------------------------------------------------
+task_partition() {
+    local host="$1"
+    local disk0 disk1 layout root_fs disk1_fs
+    disk0="$(host_disk_path "$host" 0)"
+    disk1="$(host_disk_path "$host" 1)"
+    layout="${HOST_DISK1_LAYOUT[$host]}"
+    root_fs="${HOST_ROOT_FSTYPE[$host]}"
+    disk1_fs="${HOST_DISK1_FSTYPE[$host]}"
+
+    log INFO "=== Task 2: Partition (GPT) ==="
+    log INFO "disk0=$disk0 (BOOT+ROOT) disk1=$disk1 ($layout)"
+
+    if ((! DRY_RUN)); then
+        [[ -b "$disk0" ]] || die "Disk not found: $disk0"
+        [[ -b "$disk1" ]] || die "Disk not found: $disk1"
+    fi
+
+    # disk0: ESP (fixed ${ESP_SIZE_MIB} MiB for UKI, vfat), ROOT uses the host filesystem.
+    run parted -a optimal "$disk0" -- \
+        mklabel gpt \
+        mkpart esp 1MiB "${ESP_SIZE_MIB}MiB" \
+        mkpart "$root_fs" "${ESP_SIZE_MIB}MiB" "$(parted_tail_end)" \
+        name 1 BOOT \
+        name 2 ROOT \
+        set 1 esp on \
+        print free
+
+    # disk1: HOME (ASTER, KVM), GAMES (YUGEN), or DOCKER (THEMIS).
+    local disk1_start disk1_name
+    disk1_start="$(parted_start "${HOST_DISK1_START_MIB[$host]}")"
+    disk1_name="$(disk1_volname "$host")"
+    [[ -n "$disk1_name" ]] || die "Unsupported disk1 layout '$layout'"
+    run parted -a optimal "$disk1" -- \
+        mklabel gpt \
+        mkpart "$disk1_fs" "$disk1_start" "$(parted_tail_end)" \
+        name 1 "$disk1_name" \
+        print free
+
+    if host_has_disk2 "$host"; then
+        local disk2="${HOST_DISK2_LAYOUT[$host]}"
+        local disk2_fs="${HOST_DISK2_FSTYPE[$host]}"
+        local disk2_dev disk2_name
+        disk2_dev="$(host_disk_path "$host" 2)"
+        if [[ "$disk2" == home ]]; then
+            disk2_name=HOME
+        else
+            disk2_name=DATA
+        fi
+        log INFO "disk2=$disk2_dev ($disk2, $disk2_fs -> ${HOST_DISK2_MOUNT[$host]})"
+        if ((! DRY_RUN)); then
+            [[ -b "$disk2_dev" ]] || die "Disk not found: $disk2_dev"
+        fi
+        local disk2_start
+        disk2_start="$(parted_start "${HOST_DISK2_START_MIB[$host]}")"
+        run parted -a optimal "$disk2_dev" -- \
+            mklabel gpt \
+            mkpart "$disk2_fs" "$disk2_start" "$(parted_tail_end)" \
+            name 1 "$disk2_name" \
+            print free
+    fi
+    partprobe_host "$host"
+}
+
+# ---------------------------------------------------------------------------
+# Task 3 — Create filesystems
+# ---------------------------------------------------------------------------
+task_mkfs() {
+    local host="$1"
+    local boot part_root part_disk1 layout label_disk1
+
+    boot="$(host_part_path "$host" 0 1)"
+    part_root="$(host_part_path "$host" 0 2)"
+    part_disk1="$(host_part_path "$host" 1 1)"
+    layout="${HOST_DISK1_LAYOUT[$host]}"
+    label_disk1="$(disk1_volname "$host")"
+    [[ -n "$label_disk1" ]] || die "Unsupported disk1 layout '$layout'"
+
+    local root_fs="${HOST_ROOT_FSTYPE[$host]}"
+    local disk1_fs="${HOST_DISK1_FSTYPE[$host]}"
+
+    log INFO "=== Task 3: Create filesystems ==="
+    log INFO "BOOT=$boot (vfat) ROOT=$part_root ($root_fs) ${label_disk1}=$part_disk1 ($disk1_fs)"
+
+    ensure_mkfs_tool "$root_fs"
+    ensure_mkfs_tool "$disk1_fs"
+    run /usr/bin/mkfs.vfat -F32 -n BOOT "$boot"
+    mkfs_labeled "$root_fs" ROOT "$part_root"
+    mkfs_labeled "$disk1_fs" "$label_disk1" "$part_disk1"
+
+    if host_has_disk2 "$host"; then
+        local part_disk2 label_disk2="${HOST_DISK2_LAYOUT[$host]}"
+        part_disk2="$(host_part_path "$host" 2 1)"
+        label_disk2="${label_disk2^^}"
+        local disk2_fs="${HOST_DISK2_FSTYPE[$host]}"
+        log INFO "${label_disk2}=$part_disk2 ($disk2_fs)"
+        ensure_mkfs_tool "$disk2_fs"
+        mkfs_labeled "$disk2_fs" "$label_disk2" "$part_disk2"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Task 4 — Mount filesystems
+# ---------------------------------------------------------------------------
+task_mount() {
+    local host="$1"
+    local boot part_root part_disk1 mnt_root mnt_disk1 layout
+
+    boot="$(host_part_path "$host" 0 1)"
+    part_root="$(host_part_path "$host" 0 2)"
+    part_disk1="$(host_part_path "$host" 1 1)"
+    layout="${HOST_DISK1_LAYOUT[$host]}"
+    mnt_root="$INSTALL_ROOT"
+    mnt_disk1="${INSTALL_ROOT}${HOST_DISK1_MOUNT[$host]}"
+
+    local root_fs="${HOST_ROOT_FSTYPE[$host]}"
+    local disk1_fs="${HOST_DISK1_FSTYPE[$host]}"
+
+    log INFO "=== Task 4: Mount filesystems ==="
+    log INFO "ROOT=$part_root ($root_fs) -> $mnt_root | disk1 ($layout, $disk1_fs) -> $mnt_disk1"
+
+    run mkdir -p "$mnt_root"
+
+    mount_fs "$root_fs" "$part_root" "$mnt_root"
+    run mkdir -p "$mnt_root/boot" "$mnt_disk1"
+    run /usr/bin/mount "$boot" "$mnt_root/boot"
+    mount_fs "$disk1_fs" "$part_disk1" "$mnt_disk1"
+
+    if host_has_disk2 "$host"; then
+        local part_disk2 disk2_fs mnt_disk2="${INSTALL_ROOT}${HOST_DISK2_MOUNT[$host]}"
+        part_disk2="$(host_part_path "$host" 2 1)"
+        disk2_fs="${HOST_DISK2_FSTYPE[$host]}"
+        log INFO "disk2 ($disk2_fs) -> $mnt_disk2"
+        run mkdir -p "$mnt_disk2"
+        mount_fs "$disk2_fs" "$part_disk2" "$mnt_disk2"
+    fi
+
+    log INFO "Mounted:"
+    if ((! DRY_RUN)); then
+        findmnt -R "$mnt_root" 2>/dev/null || mount | grep -E '^/dev/(nvme|vd)' || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Task 5 — Live pacman repos (before pacstrap; pacstrap uses host pacman.conf)
+# ---------------------------------------------------------------------------
+task_configure_pacman() {
+    local host="$1"
+
+    log INFO "=== Task 5: configure live pacman (repos + mirrorlist) before pacstrap ==="
+
+    require_mounted "$INSTALL_ROOT"
+    wait_for_network
+
+    if [[ "$host" == THEMIS ]]; then
+        themis_stage_local_repo
+    fi
+    append_pacman_repo "$host"
+
+    log INFO "Updating live mirrorlist with reflector..."
+    refresh_live_mirrorlist
+    configure_pacman_options
+
+    log INFO "Refreshing live package databases and Arch signing keys..."
+    # Arch explicitly permits updating archlinux-keyring before the full
+    # transaction. This lets an older live ISO verify newly signed packages.
+    run pacman -Sy --needed --noconfirm archlinux-keyring
+}
+
+# Install-time ranking is deliberately smaller than the steady-state policy in
+# the os role. ArchWiki's install example is five recent HTTPS mirrors.
+refresh_live_mirrorlist() {
+    local candidate
+    if ((DRY_RUN)); then
+        log DRY-RUN "/usr/bin/reflector --latest 5 --protocol https --age 12 --sort rate --save /tmp/arch-install-mirrorlist"
+        log DRY-RUN "require '^Server ' in the candidate, then install it to /etc/pacman.d/mirrorlist"
+        return 0
+    fi
+
+    candidate="$(mktemp /tmp/arch-install-mirrorlist.XXXXXX)"
+    if ! run /usr/bin/reflector \
+        --latest 5 \
+        --protocol https \
+        --age 12 \
+        --sort rate \
+        --save "$candidate"; then
+        rm -f "$candidate"
+        die "reflector failed to rank live mirrors"
+    fi
+    if ! grep -q '^Server ' "$candidate"; then
+        rm -f "$candidate"
+        die "reflector produced a mirrorlist with no Server entries"
+    fi
+    run install -m 0644 "$candidate" /etc/pacman.d/mirrorlist
+    rm -f "$candidate"
+}
+
+# Matches os role defaults: five parallel downloads, and NoExtract so
+# pacman-mirrorlist cannot drop a mirrorlist.pacnew over the managed file.
+configure_pacman_options() {
+    set_pacman_option ParallelDownloads 5
+    set_pacman_option NoExtract etc/pacman.d/mirrorlist
+}
+
+set_pacman_option() {
+    local key="$1"
+    local value="$2"
+    local file=/etc/pacman.conf
+    if ((DRY_RUN)); then
+        log DRY-RUN "set ${key} = ${value} in ${file}"
+        return 0
+    fi
+    if grep -qE "^#?[[:space:]]*${key}[[:space:]]*=" "$file"; then
+        sed -i -E "s|^#?[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" "$file"
+    else
+        sed -i "/^\\[options\\]/a ${key} = ${value}" "$file"
+    fi
+    grep -qxF "${key} = ${value}" "$file" || die "failed to set ${key} in ${file}"
+}
+
+# ---------------------------------------------------------------------------
+# Task 6 — Install base system (pacstrap)
+# ---------------------------------------------------------------------------
+task_pacstrap() {
+    local host="$1"
+    local kernel="${HOST_KERNEL[$host]}"
+    local mcode="${HOST_MCODE[$host]}"
+    local mnt="$INSTALL_ROOT"
+
+    log INFO "=== Task 6: pacstrap base system ==="
+    log INFO "linux${kernel} + host mcode packages"
+
+    require_mounted "$mnt"
+
+    log INFO "Installing base system with pacstrap..."
+    local -a extra=()
+    if [[ -n "$mcode" ]]; then
+        # shellcheck disable=SC2206
+        extra=($mcode)
+    fi
+    run /usr/bin/pacstrap -K "$mnt" "${PACSTRAP_BASE_PKGS[@]}" \
+        "${extra[@]}" "linux${kernel}" "linux${kernel}-headers"
+}
+
+# ---------------------------------------------------------------------------
+# Task 7 — fstab, symlinks, hosts (post-pacstrap)
+# ---------------------------------------------------------------------------
+themis_stage_local_repo() {
+    log INFO "THEMIS: staging local-repo from ${THEMIS_BINARIES_REPO}..."
+
+    if ((DRY_RUN)); then
+        log DRY-RUN "pacman -Sy --needed git git-lfs"
+        log DRY-RUN "git clone ${THEMIS_BINARIES_REPO} ${THEMIS_BINARIES_ROOT}"
+        log DRY-RUN "git -C ${THEMIS_BINARIES_ROOT} lfs install"
+        log DRY-RUN "git -C ${THEMIS_BINARIES_ROOT} lfs pull"
+        log DRY-RUN "repo-add ${THEMIS_BINARIES_ROOT}/themis/local-repo.db.tar.gz ${THEMIS_BINARIES_ROOT}/themis/*.pkg.tar.zst"
+        return 0
+    fi
+
+    wait_for_network
+    run pacman -Sy --needed --noconfirm git git-lfs
+
+    if [[ -d "${THEMIS_BINARIES_ROOT}/.git" ]]; then
+        log INFO "THEMIS: refreshing existing clone at ${THEMIS_BINARIES_ROOT}"
+        run git -C "${THEMIS_BINARIES_ROOT}" pull --ff-only
+    else
+        run rm -rf "${THEMIS_BINARIES_ROOT}"
+        run git clone "${THEMIS_BINARIES_REPO}" "${THEMIS_BINARIES_ROOT}"
+    fi
+
+    run git -C "${THEMIS_BINARIES_ROOT}" lfs install
+    run git -C "${THEMIS_BINARIES_ROOT}" lfs pull
+
+    if [[ ! -d "${THEMIS_BINARIES_ROOT}/themis" ]]; then
+        log WARN "THEMIS: ${THEMIS_BINARIES_ROOT}/themis missing after git lfs pull; skipping repo-add"
+        return 0
+    fi
+
+    # shellcheck disable=SC2086
+    run bash -c "repo-add ${THEMIS_BINARIES_ROOT}/themis/local-repo.db.tar.gz ${THEMIS_BINARIES_ROOT}/themis/*.pkg.tar.zst"
+}
+
+append_pacman_repo() {
+    local host="$1"
+    # Live ISO config — pacstrap installs using the host's /etc/pacman.conf
+    local conf=/etc/pacman.conf
+    local section
+
+    case "$host" in
+        THEMIS) section=local-repo ;;
+        ASTER | YUGEN | KVM) section=tekne ;;
+        *) die "append_pacman_repo: unhandled host '$host'" ;;
+    esac
+
+    if ((DRY_RUN)); then
+        log DRY-RUN "append [$section] to $conf (if missing)"
+        return 0
+    fi
+    if grep -q "^\[${section}\]" "$conf" 2>/dev/null; then
+        log INFO "pacman.conf already has [$section]; skipping append"
+        return 0
+    fi
+
+    log INFO "Appending [$section] to $conf"
+    case "$section" in
+        local-repo)
+            cat >>"$conf" <<'EOF'
+
+[local-repo]
+SigLevel = Optional TrustAll
+Server = file:///tmp/binaries/themis
+EOF
+            ;;
+        tekne)
+            cat >>"$conf" <<'EOF'
+
+[tekne]
+SigLevel = Optional TrustAll
+Server = http://repo.tekne.sv
+
+[multilib]
+Include = /etc/pacman.d/mirrorlist
+
+EOF
+            ;;
+    esac
+}
+
+task_configure_base() {
+    local host="$1"
+    local mnt="$INSTALL_ROOT"
+
+    log INFO "=== Task 7: post-install base configuration ==="
+
+    require_chroot_ready "$mnt"
+
+    if [[ -f /etc/pacman.conf ]]; then
+        run mkdir -p "$mnt/etc"
+        if [[ -f "$mnt/etc/pacman.conf" ]]; then
+            run cp "$mnt/etc/pacman.conf" "$mnt/etc/pacman.conf.pacstrap.bak"
+        fi
+        run cp /etc/pacman.conf "$mnt/etc/pacman.conf"
+    fi
+    if ((! DRY_RUN)) && [[ -f /etc/pacman.d/mirrorlist ]]; then
+        run mkdir -p "$mnt/etc/pacman.d"
+        run cp /etc/pacman.d/mirrorlist "$mnt/etc/pacman.d/mirrorlist"
+    fi
+
+    log INFO "Generating fstab..."
+    if ((DRY_RUN)); then
+        log DRY-RUN "genfstab -U $mnt >> $mnt/etc/fstab"
+        log DRY-RUN "cp $mnt/etc/fstab $mnt/etc/fstab.origin"
+        log DRY-RUN "sed -i relatime->noatime on $mnt/etc/fstab"
+    elif [[ -f "$mnt/etc/fstab" ]] && grep -q 'LABEL=ROOT' "$mnt/etc/fstab" 2>/dev/null; then
+        log INFO "fstab already lists LABEL=ROOT; skipping genfstab"
+        cp "$mnt/etc/fstab" "$mnt/etc/fstab.origin"
+        sed -i 's|relatime|noatime|g' "$mnt/etc/fstab"
+    else
+        genfstab -U "$mnt" >>"$mnt/etc/fstab"
+        cp "$mnt/etc/fstab" "$mnt/etc/fstab.origin"
+        sed -i 's|relatime|noatime|g' "$mnt/etc/fstab"
+    fi
+
+    run ln -sf /usr/bin/vim "$mnt/usr/bin/vi"
+    if [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
+        run ln -sf /run/systemd/resolve/stub-resolv.conf "$mnt/etc/resolv.conf"
+    else
+        log WARN "stub-resolv.conf not found on host; skipping resolv.conf symlink"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Task 8 — locale, timezone, hostname (arch-chroot)
+# ---------------------------------------------------------------------------
+task_configure_chroot() {
+    local host="$1"
+    local mnt="$INSTALL_ROOT"
+
+    log INFO "=== Task 8: chroot locale, timezone, hostname (UKI boot deferred to post-Ansible) ==="
+
+    require_chroot_ready "$mnt"
+
+    chroot_run "$mnt" ln -sf "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
+    chroot_run "$mnt" hwclock --systohc
+    chroot_run "$mnt" sed -i 's|#en_US.UTF-8 UTF-8|en_US.UTF-8 UTF-8|g' /etc/locale.gen
+    chroot_run "$mnt" locale-gen
+    chroot_bash "$mnt" "echo 'LANG=en_US.UTF-8' > /etc/locale.conf"
+    chroot_bash "$mnt" "echo 'KEYMAP=us' > /etc/vconsole.conf"
+    chroot_bash "$mnt" "grep -qF '${host}.tekne.sv' /etc/hosts || echo '127.0.0.1 localhost ${host}.tekne.sv ${host}' >> /etc/hosts"
+    chroot_bash "$mnt" "echo '${host}' > /etc/hostname"
+
+    log INFO "Reloading systemd units..."
+    run systemctl daemon-reload
+    chroot_run "$mnt" systemctl daemon-reload
+
+    chroot_bash "$mnt" 'mkdir -p /var/cache/{pacman/pkg,docker/build,staging,build}'
+
+    if [[ "$host" == THEMIS ]]; then
+        log INFO "THEMIS: cache bind mounts (skipped if /mnt/cache not present)..."
+        themis_cache_bind_mounts "$mnt"
+        log INFO "THEMIS-specific chroot configuration completed."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Task 9 — Ansible playbooks in chroot, then UKI boot finalization
+# ---------------------------------------------------------------------------
+task_run_ansible() {
+    local host="$1"
+    local mnt="$INSTALL_ROOT"
+    local -a vault_args=()
+
+    log INFO "=== Task 9: Ansible (host-specific tags) ==="
+
+    require_chroot_ready "$mnt"
+    require_chroot_cmds "$mnt"
+    wait_for_network
+    # A resumed --from-task 9 run may not have executed task 0.
+    run timedatectl set-ntp true
+    wait_for_ntp_sync
+    prepare_chroot_pacman "$mnt"
+
+    if [[ -n "$VAULT_PASS_FILE" ]]; then
+        [[ -r "$VAULT_PASS_FILE" ]] || die "Vault password file not readable: $VAULT_PASS_FILE"
+        chroot_stage_vault_pass "$mnt"
+        vault_args=(--vault-password-file "${CHROOT_VAULT_PASS}")
+    else
+        vault_args=(--ask-vault-pass)
+    fi
+
+    stage_ansible_sources "$mnt"
+    require_vault_vars "$host" "$mnt"
+
+    chroot_install_ansible_collections "$mnt"
+
+    local tags="${HOST_CHROOT_ANSIBLE_TAGS[$host]}"
+    local -a extra_vars=(-e install_chroot_phase=true)
+    if [[ "$host" == ASTER ]]; then
+        extra_vars+=(-e network_connect_wifi=false)
+    fi
+    log INFO "Running chroot Ansible for ${host} (tags: ${tags})..."
+    ansible_chroot_playbook "$mnt" "$host" "$tags" "${vault_args[@]}" "${extra_vars[@]}"
+
+    configure_uki_boot "$host" "$mnt"
+
+    chroot_cleanup_vault_pass "$mnt"
+    log INFO "Ansible configuration and UKI boot finalization completed."
+}
+
+# pacstrap -K creates a target-specific keyring and the archlinux-keyring
+# package (a dependency of base) populates it. Validate that result before
+# Ansible invokes pacman. A reset is limited to this fresh target and happens
+# only if the generated key database is unusable.
+prepare_chroot_pacman() {
+    local mnt="$1"
+
+    log INFO "Validating the target pacman keyring before Ansible..."
+    if ((DRY_RUN)); then
+        log DRY-RUN "pacman-key --init && pacman-key --populate archlinux"
+        log DRY-RUN "reset the fresh target keyring only if validation fails"
+        log DRY-RUN "pacman -Sy --needed archlinux-keyring && pacman -Su"
+        return 0
+    fi
+
+    if ! chroot_bash "$mnt" \
+        "pacman-key --init &&
+         pacman-key --populate archlinux &&
+         pacman-key --list-keys 2>/dev/null | grep -q '^pub'"; then
+        log WARN "Target pacman keyring is incomplete; rebuilding it."
+        reset_chroot_pacman_keyring "$mnt"
+    fi
+
+    # This is the Arch-supported sequence for an outdated keyring: update the
+    # keyring immediately after syncing, then complete the full upgrade.
+    if ! chroot_run "$mnt" pacman -Sy --needed --noconfirm archlinux-keyring; then
+        log WARN "Keyring package verification failed; rebuilding the fresh target keyring and retrying."
+        reset_chroot_pacman_keyring "$mnt"
+        chroot_run "$mnt" pacman -Sy --needed --noconfirm archlinux-keyring
+    fi
+    chroot_run "$mnt" pacman-key --populate archlinux
+    chroot_run "$mnt" pacman -Su --noconfirm
+}
+
+reset_chroot_pacman_keyring() {
+    local mnt="$1"
+    run rm -rf "${mnt}/etc/pacman.d/gnupg"
+    chroot_run "$mnt" pacman-key --init
+    chroot_run "$mnt" pacman-key --populate archlinux
+}
+
+task_summary() {
+    local host="$1"
+    log INFO "Install summary: $host (${HOST_ROLE[$host]}) on ${INSTALL_ROOT}"
+    log INFO "Kernel: linux${HOST_KERNEL[$host]} | log: $LOG_FILE"
+}
+
+# Host-specific steps after reboot (chroot task 9 is only the first Ansible phase).
+print_post_install_steps() {
+    local host="$1"
+    local repo_root="/media/ansible"
+
+    echo
+    echo "================================================================"
+    echo "  NEXT STEPS — complete setup after reboot"
+    echo "================================================================"
+    echo
+    echo "  1. Reboot into the installed system (remove live ISO if needed)."
+    echo "  2. Log in locally or over SSH."
+    echo "  3. Run the post-install playbook from the installed copy of the repo:"
+    echo
+    echo "     cd ${repo_root}"
+    echo "     ${HOST_POST_INSTALL_COMMAND[$host]}"
+    echo
+    if [[ "$host" == ASTER ]]; then
+        echo "  ASTER WiFi connects on this run (deferred during live ISO install)."
+    fi
+    if [[ "$host" == ASTER ]]; then
+        echo "  OneDrive does not prompt during this run. After the desktop is up, run:"
+        echo "    ./playbooks/personal/onedrive-auth.sh"
+        echo "  Log in to the desktop first if you want session-specific theming applied."
+    fi
+    echo
+    echo "  Vault: use --vault-password-file ~/.vault_pass instead of --ask-vault-pass"
+    echo "  when running non-interactively."
+    echo
+    echo "  If the checkout is not at ${repo_root}, run from the repo root:"
+    echo "  ./playbooks/personal/workstation.sh"
+    echo "================================================================"
+    echo
+}
+
+run_pipeline() {
+    local host="$1"
+    local t name total="${#PIPELINE[@]}"
+
+    if ((FROM_TASK < 0 || FROM_TASK >= total)); then
+        die "Invalid --from-task $FROM_TASK (valid: 0-$((total - 1)))"
+    fi
+
+    for ((t = FROM_TASK; t < total; t++)); do
+        name="${PIPELINE[$t]}"
+        log INFO "--- Pipeline [$t/${total}] task_${name} ---"
+        "task_${name}" "$host"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+$SCRIPT_NAME v$VERSION — Arch install with host profiles
+
+Usage:
+  $SCRIPT_NAME [OPTIONS] [HOST]
+
+Options:
+  -n, --dry-run              Print commands without executing
+  --skip-network-wait        Skip connectivity wait (offline / manual setup)
+  --from-task N              Start at pipeline task N (0-$((${#PIPELINE[@]} - 1)))
+  --vault-password-file PATH Ansible vault password file (non-interactive)
+  -h, --help                 Show this help
+
+Hosts:
+  THEMIS   server (nvme0 BOOT/ROOT, nvme1 DOCKER, nvme2 CACHE=/mnt/cache)
+  ASTER    laptop (nvme0 BOOT/ROOT, nvme1 HOME)
+  YUGEN    pc     (nvme0 BOOT/ROOT ext4, nvme1 GAMES=/mnt/games xfs 4Kn, nvme2 HOME xfs 4Kn)
+  KVM      vm     (vda BOOT/ROOT, vdb HOME)
+
+If HOST is omitted, detection uses DMI product/board name or hostname.
+
+Pipeline tasks (use --from-task N):
+  0  timedatectl + verified NTP synchronization
+  1  nvme secure format
+  2  GPT partition
+  3  mkfs
+  4  mount under $INSTALL_ROOT
+  5  live pacman repos, reflector, refreshed Arch signing keyring
+  6  pacstrap
+  7  fstab, pacman.conf copy, symlinks
+  8  chroot locale, timezone, hostname, THEMIS cache binds
+  9  target keyring/full-upgrade preflight, Ansible, UKI boot
+
+After reboot (second Ansible phase):
+  ASTER/YUGEN/KVM/THEMIS  cd /media/ansible && ./playbooks/personal/workstation.sh
+  THEMIS                  ./playbooks/personal/server.sh is the same runner, restricted to THEMIS
+EOF
+}
+
+validate_from_task() {
+    local n="${1:-}"
+    [[ "$n" =~ ^[0-9]+$ ]] || die "--from-task requires a number (0-$((${#PIPELINE[@]} - 1)))"
+    ((n >= 0 && n < ${#PIPELINE[@]})) || die "Invalid --from-task $n (valid: 0-$((${#PIPELINE[@]} - 1)))"
+    FROM_TASK=$n
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n | --dry-run) DRY_RUN=1 ;;
+            --skip-network-wait) SKIP_NETWORK_WAIT=1 ;;
+            --from-task)
+                shift
+                [[ $# -gt 0 ]] || die "--from-task requires a task number"
+                validate_from_task "$1"
+                ;;
+            --vault-password-file)
+                shift
+                [[ $# -gt 0 ]] || die "--vault-password-file requires a path"
+                VAULT_PASS_FILE=$1
+                ;;
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            THEMIS | ASTER | YUGEN | KVM) FORCE_HOST="$1" ;;
+            *) die "Unknown argument: $1 (try --help)" ;;
+        esac
+        shift
+    done
+}
+
+main() {
+    parse_args "$@"
+
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/arch-install.log"
+
+    require_root
+    trap cleanup_install_resources EXIT INT TERM
+    require_live_cmds
+
+    local host
+    host="$(detect_host "$FORCE_HOST")"
+    [[ -n "$host" ]] || die "Could not detect host. Pass one of: ${VALID_HOSTS[*]}"
+    validate_host "$host"
+    host_banner "$host"
+
+    if ((FROM_TASK == 0)); then
+        confirm_destroy "$host"
+    else
+        log INFO "Resuming from task $FROM_TASK (${PIPELINE[$FROM_TASK]}) — skipping destroy confirmation"
+    fi
+
+    ensure_live_network "$host"
+    run_pipeline "$host"
+    task_summary "$host"
+    print_post_install_steps "$host"
+
+    log INFO "=== Install pipeline complete for $host ==="
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

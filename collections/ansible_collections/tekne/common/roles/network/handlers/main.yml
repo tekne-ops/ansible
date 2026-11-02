@@ -1,0 +1,31 @@
+---
+- name: Ensure systemd-networkd is running
+  ansible.builtin.systemd:
+    name: systemd-networkd.service
+    state: started
+  when: not network_install_chroot_phase | bool
+  listen: Reload systemd-networkd
+
+- name: Reload systemd-networkd configuration
+  ansible.builtin.command: networkctl reload
+  when: not network_install_chroot_phase | bool
+  changed_when: true
+  listen: Reload systemd-networkd
+
+- name: Reload systemd manager configuration
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: Reload systemd
+
+- name: Restart systemd-resolved
+  ansible.builtin.systemd:
+    name: systemd-resolved.service
+    state: restarted
+  when: not network_install_chroot_phase | bool
+  listen: Restart systemd-resolved
+
+- name: Restart TLP
+  ansible.builtin.systemd:
+    name: tlp.service
+    state: restarted
+  when: not network_install_chroot_phase | bool

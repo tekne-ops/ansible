@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: HAProxy TLS reverse proxy container for tekne.sv
+  namespace: tekne
+  role_name: haproxy
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - docker
+    - haproxy
+collections:
+  - community.docker
+  - community.general
+dependencies: []

@@ -1,0 +1,30 @@
+---
+namespace: tekne
+name: personal
+version: 1.0.0
+readme: README.md
+authors:
+  - dvaliente
+license:
+  - MIT
+description: Tekne desktop, homelab, and workstation roles
+repository: https://github.com/tekne-ops/ansible
+issues: https://github.com/tekne-ops/ansible/issues
+homepage: https://github.com/tekne-ops/ansible
+documentation: https://github.com/tekne-ops/ansible/tree/main/collections/ansible_collections/tekne/personal
+tags:
+  - linux
+  - archlinux
+  - desktop
+  - homelab
+  - laptop
+  - workstation
+dependencies:
+  amazon.aws: '>=7.0.0'
+  ansible.posix: '>=1.5.0'
+  community.docker: '>=4.0.0'
+  community.general: '>=10.0.0'
+  tekne.common: '>=1.0.0'
+build_ignore:
+  - tests
+  - roles/*/tests

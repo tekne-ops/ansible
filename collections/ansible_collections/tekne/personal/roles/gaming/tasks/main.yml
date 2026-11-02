@@ -1,0 +1,310 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for ./ansible-role-gaming
+
+# =============================================================================
+# Network Connectivity Check
+# =============================================================================
+
+- name: Wait for network connectivity before package installation
+  ansible.builtin.command:
+    cmd: ping -c 1 -W 2 archlinux.org
+  register: gaming_network_check
+  until: gaming_network_check.rc == 0
+  retries: 30
+  delay: 2
+  changed_when: false
+  tags:
+    - gaming
+    - network
+    - packages
+
+# =============================================================================
+# Package Installation
+# =============================================================================
+
+- name: Install gaming packages
+  community.general.pacman:
+    name: "{{ gaming_packages }}"
+    state: present
+    extra_args: '--noconfirm --needed'
+  register: gaming_install_result
+  tags:
+    - gaming
+    - packages
+
+# =============================================================================
+# File Configuration
+# =============================================================================
+
+- name: Set effective hostname for gaming role
+  ansible.builtin.set_fact:
+    gaming_effective_hostname: >-
+      {{
+        (hostname | default(cached_hostname | default(ansible_facts['hostname'])))
+        | upper
+      }}
+  tags:
+    - gaming
+    - config
+
+- name: Ensure the games group exists
+  ansible.builtin.group:
+    name: games
+    state: present
+  when: gaming_effective_hostname in gaming_library_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Grant the games group write access to the game library
+  ansible.builtin.file:
+    path: "{{ gaming_library_path }}"
+    state: directory
+    owner: root
+    group: games
+    mode: "2775"
+  when: gaming_effective_hostname in gaming_library_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Install YUGEN NVIDIA Xorg configuration
+  ansible.builtin.copy:
+    src: game.conf
+    dest: "{{ gaming_xorg_conf_dest }}"
+    owner: root
+    group: root
+    mode: '0644'
+  register: gaming_xorg_conf_result
+  when: gaming_effective_hostname in gaming_xorg_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Install gaming limits configuration
+  ansible.builtin.copy:
+    src: gaming-limits.conf
+    dest: "{{ gaming_limits_conf_dest }}"
+    owner: root
+    group: root
+    mode: '0644'
+  register: gaming_conf_result
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Copy game script to /usr/local/bin
+  ansible.builtin.copy:
+    src: game
+    dest: "{{ gaming_script_dest }}"
+    owner: root
+    group: root
+    mode: '0755'
+  register: gaming_script_result
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Ensure the local applications directory exists
+  ansible.builtin.file:
+    path: /usr/local/share/applications
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Start Steam through gamemoderun
+  ansible.builtin.copy:
+    src: steam.desktop
+    dest: /usr/local/share/applications/steam.desktop
+    owner: root
+    group: root
+    mode: '0644'
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Load ntsync at boot
+  ansible.builtin.copy:
+    src: ntsync.conf
+    dest: /etc/modules-load.d/ntsync.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Check whether the running kernel ships ntsync
+  ansible.builtin.command:
+    cmd: modprobe --dry-run --verbose ntsync
+  register: gaming_ntsync_available
+  changed_when: false
+  failed_when: false
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Load the ntsync module
+  community.general.modprobe:
+    name: ntsync
+    state: present
+  when:
+    - gaming_effective_hostname in gaming_hosts
+    - gaming_ntsync_available.rc | default(1) == 0
+  tags:
+    - gaming
+    - config
+
+- name: Install schedtoold configuration
+  ansible.builtin.copy:
+    src: schedtoold.conf
+    dest: "{{ gaming_schedtoold_conf_dest }}"
+    owner: root
+    group: root
+    mode: '0644'
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Install gamemode configuration
+  ansible.builtin.copy:
+    src: gamemode.ini
+    dest: "{{ gaming_gamemode_ini_dest }}"
+    owner: root
+    group: root
+    mode: '0644'
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Enable and start schedtoold.service
+  ansible.builtin.systemd:
+    name: schedtoold
+    enabled: true
+    state: started
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Ensure gamemode group exists
+  ansible.builtin.group:
+    name: gamemode
+    state: present
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Add gaming users to gamemode group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: gamemode
+    append: true
+  loop: "{{ gaming_gamemode_users }}"
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+# =============================================================================
+# Verification
+# =============================================================================
+
+- name: Verify gaming packages are installed
+  ansible.builtin.command:
+    cmd: "pacman -Q {{ item }}"
+  loop: "{{ gaming_packages }}"
+  register: gaming_package_verify
+  changed_when: false
+  failed_when: gaming_package_verify.rc != 0
+  tags:
+    - gaming
+    - verify
+
+- name: Verify gaming limits configuration exists
+  ansible.builtin.stat:
+    path: "{{ gaming_limits_conf_dest }}"
+  register: gaming_conf_stat
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - verify
+
+- name: Assert gaming limits configuration was copied
+  ansible.builtin.assert:
+    that:
+      - gaming_conf_stat.stat.exists
+      - gaming_conf_stat.stat.mode == '0644'
+    fail_msg: "gaming limits configuration was not copied correctly"
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - verify
+
+- name: Verify YUGEN NVIDIA Xorg configuration exists
+  ansible.builtin.stat:
+    path: "{{ gaming_xorg_conf_dest }}"
+  register: gaming_xorg_conf_stat
+  when: gaming_effective_hostname in gaming_xorg_hosts
+  tags:
+    - gaming
+    - verify
+
+- name: Assert YUGEN NVIDIA Xorg configuration was copied
+  ansible.builtin.assert:
+    that:
+      - gaming_xorg_conf_stat.stat.exists
+      - gaming_xorg_conf_stat.stat.mode == '0644'
+    fail_msg: "YUGEN NVIDIA Xorg configuration was not copied correctly"
+  when: gaming_effective_hostname in gaming_xorg_hosts
+  tags:
+    - gaming
+    - verify
+
+- name: Verify game script exists and is executable
+  ansible.builtin.stat:
+    path: "{{ gaming_script_dest }}"
+  register: gaming_script_stat
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - verify
+
+- name: Assert game script was copied and is executable
+  ansible.builtin.assert:
+    that:
+      - gaming_script_stat.stat.exists
+      - gaming_script_stat.stat.executable
+      - gaming_script_stat.stat.mode == '0755'
+    fail_msg: "game script was not copied or is not executable"
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - verify
+
+- name: Display installation summary
+  ansible.builtin.debug:
+    msg: |
+      Gaming Installation Summary ({{ gaming_effective_hostname }}):
+      ==============================================================
+      Packages installed: {{ gaming_install_result is success }}
+      NVIDIA Xorg config: {{ (gaming_xorg_conf_result is success) if gaming_effective_hostname in gaming_xorg_hosts else 'skipped' }}
+      limits config: {{ (gaming_conf_result is success) if gaming_effective_hostname in gaming_hosts else 'skipped' }}
+      game script: {{ (gaming_script_result is success) if gaming_effective_hostname in gaming_hosts else 'skipped' }}
+  tags:
+    - gaming
+    - verify

@@ -1,0 +1,126 @@
+---
+# User configuration
+bootstrap_user: dvaliente
+bootstrap_group: users
+bootstrap_home: "/home/{{ bootstrap_user }}"
+
+# =============================================================================
+# OneDrive Configuration
+# =============================================================================
+
+# OneDrive sync directory
+bootstrap_onedrive: /srv/OneDrive
+
+# OneDrive config directory (config file: <this_dir>/config).
+# The sync command and user service both use this directory.
+bootstrap_onedrive_config_dir: "{{ bootstrap_home }}/.config/onedrive"
+
+# OneDrive binary path
+bootstrap_onedrive_binary: /usr/bin/onedrive
+
+# First sync options. --resync --resync-auth is required because this repo
+# installs sync_list before the first authenticated run. The client seeds
+# .sync_list.hash with "initial-hash", then the next start (the user service)
+# exits 126 until --resync stores the real hash. --resync-auth accepts that
+# without the interactive Y/N prompt.
+bootstrap_onedrive_sync_options: "--sync --download-only --verbose --resync --resync-auth"
+
+# Timeout for first sync in seconds (1 hour default)
+bootstrap_onedrive_sync_timeout: 3600
+
+# Temporary log used to expose the interactive device-authentication URL.
+bootstrap_onedrive_auth_log: /tmp/tekne-onedrive-first-sync.log
+
+# Normal convergence does not wait at a Microsoft device-login prompt.
+# playbooks/onedrive-auth.yml sets this for the one-time sign-in.
+bootstrap_onedrive_interactive: false
+
+# =============================================================================
+# Bluetooth Configuration
+# =============================================================================
+
+# Bluetooth device name (defaults to hostname)
+bootstrap_bluetooth_name: "{{ ansible_facts.get('hostname', 'BlueZ') }}"
+
+# =============================================================================
+# XFCE Desktop Configuration
+# =============================================================================
+
+# Wallpaper path
+bootstrap_xfce_wallpaper: "{{ bootstrap_home }}/Pictures/Wallpapers/alexander-anderson-bayonet-hellsing-ultimate-4k-wallpaper-uhdpaper.com-231@5@d.jpg"
+
+# Monitor names for wallpaper configuration. Host profiles set the real outputs.
+bootstrap_xfce_monitors: []
+
+# Theme settings
+bootstrap_xfce_cursor_theme: "Bibata-Original-Amber"
+bootstrap_xfce_wm_theme: "minimal-grey2"
+bootstrap_xfce_gtk_theme: "Adwaita-dark"
+bootstrap_xfce_icon_theme: "Flat-Remix-Cyan-Dark"
+
+# Font settings
+bootstrap_xfce_font: "Sans 11"
+bootstrap_xfce_monospace_font: "Monospace 11"
+bootstrap_xfce_font_rgba: "rgb"
+
+# Workspace settings
+bootstrap_xfce_workspace_count: 1
+
+# Whether to skip XFCE configuration if no X session is available
+bootstrap_xfce_skip_if_no_display: true
+
+# =============================================================================
+# Package Installation
+# =============================================================================
+
+# Packages to install via pacman (--noconfirm --needed)
+bootstrap_packages:
+  - microsoft-edge-stable-bin
+  - google-chrome
+  - zoom
+  - ventoy-bin
+  - visual-studio-code-bin
+  - cursor-bin
+  - teams-for-linux-bin
+  - httpfs2-2gbplus
+  # - heroic-games-launcher
+  - crossover
+  - deezer
+  - asar
+  - imagemagick
+  - liblqr
+  - omnissa-horizon-client
+  - transmission-qt
+  - ocs-url
+  - bitwarden-bin
+  - yubico-authenticator-bin
+
+# Files synchronized from OneDrive and linked into the managed user's home.
+bootstrap_symlinks:
+  - { src: "{{ bootstrap_onedrive }}/Documents/sc/asd.py", dest: "{{ bootstrap_home }}/bin/asd" }
+  - { src: "{{ bootstrap_onedrive }}/Documents", dest: "{{ bootstrap_home }}/Documents" }
+  - { src: "{{ bootstrap_onedrive }}/Documents/notes", dest: "{{ bootstrap_home }}/.local/share/notes" }
+  - { src: "{{ bootstrap_onedrive }}/Documents/sc/bashrc.txt", dest: "{{ bootstrap_home }}/.bashrc" }
+  - { src: "{{ bootstrap_onedrive }}/Documents/sc/remmina/share/remmina", dest: "{{ bootstrap_home }}/.local/share/remmina" }
+  - { src: "{{ bootstrap_onedrive }}/Documents/sc/sshconfig", dest: "{{ bootstrap_home }}/.ssh/config" }
+  - { src: "{{ bootstrap_onedrive }}/Pictures", dest: "{{ bootstrap_home }}/Pictures" }
+  - { src: "{{ bootstrap_onedrive }}/Pictures/Avatars/fierce-yugen.jpg", dest: "{{ bootstrap_home }}/.face.icon" }
+  - { src: "{{ bootstrap_onedrive }}/Pictures/Avatars/fierce-yugen.jpg", dest: "{{ bootstrap_home }}/.face" }
+
+# Replaces the former ~/.config/Cursor/User and ~/.cursor symlinks.
+bootstrap_cursor_restore: /srv/code/tekne/bash/bin/restore-cursor
+
+bootstrap_bluetooth_config:
+  - { regexp: '#Name = BlueZ', line: "Name = {{ bootstrap_bluetooth_name }}" }
+  - { regexp: '#AutoEnable=true', line: 'AutoEnable=true' }
+  - { regexp: '#SessionMode = basic', line: 'SessionMode = ertm' }
+  - { regexp: '#StreamMode = basic', line: 'StreamMode = streaming' }
+  - { regexp: '#NameResolving = true', line: 'NameResolving = true' }
+  - { regexp: '#MultiProfile = off', line: 'MultiProfile = multiple' }
+  - { regexp: '#ControllerMode = dual', line: 'ControllerMode = dual' }
+  # Fast Connectable spends the radio on classic page scan. The Aerox 9
+  # Bluetooth mode is BLE and then fails to connect.
+  - { regexp: '^(#)?FastConnectable\s*=', line: 'FastConnectable = false' }
+  # A mouse starts Just Works pairing itself and cannot confirm a prompt.
+  # "confirm" rejects that repair unless a desktop agent answers; "always" accepts it.
+  - { regexp: '^(#)?JustWorksRepairing\s*=', line: 'JustWorksRepairing = always' }

@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Post-install packages, OneDrive first sync, home symlinks, Bluetooth, and XFCE desktop settings
+  namespace: tekne
+  role_name: bootstrap
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - bootstrap
+    - desktop
+collections:
+  - community.general
+dependencies: []

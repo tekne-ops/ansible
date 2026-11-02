@@ -1,0 +1,108 @@
+---
+argument_specs:
+  main:
+    short_description: Locale, NTP, mirrors, host services, and Tekne repository clones
+    description:
+      - Configures locale, NTP, pacman mirrors, services, and Tekne git clones.
+    options:
+      os_hostname:
+        description: Hostname (resolved from playbook pre_tasks).
+        required: false
+        type: str
+      os_hostname_raw:
+        description: The hostname raw value for the os role.
+        required: false
+        type: str
+      os_install_chroot_phase:
+        description: 'During arch-chroot install: enable units but do not start services (PID 1 is live ISO).'
+        required: false
+        type: bool
+        default: false
+      os_cpupower_governor:
+        description: CPU governor written to the cpupower configuration.
+        required: false
+        type: str
+        default: schedutil
+      os_cpupower_start_hosts:
+        description: Hostnames that start the cpupower service.
+        required: false
+        type: list
+        elements: str
+        default: []
+      os_cpupower_skip_hosts:
+        description: Hostnames that do not receive a cpupower governor line.
+        required: false
+        type: list
+        elements: str
+        default: []
+      os_irqbalance_start_hosts:
+        description: Hostnames that start irqbalance.
+        required: false
+        type: list
+        elements: str
+        default: []
+      os_irqbalance_stop_hosts:
+        description: Hostnames that keep irqbalance disabled.
+        required: false
+        type: list
+        elements: str
+        default: []
+      os_manage_server_services:
+        description: Enable cronie, irqbalance, and sshd as the server service set.
+        required: false
+        type: bool
+        default: false
+      os_clone_tekne_repos:
+        description: The clone tekne repos value for the os role.
+        required: false
+        type: bool
+      os_locale:
+        description: Locale settings.
+        required: false
+        type: str
+        default: en_US.UTF-8
+      os_mirror_protocols:
+        description: Protocols Reflector may select. HTTPS only.
+        required: false
+        type: str
+        default: https
+      os_mirror_age:
+        description: Maximum mirror synchronization age in hours.
+        required: false
+        type: int
+        default: 24
+      os_mirror_latest:
+        description: How many recently synchronized mirrors Reflector may benchmark.
+        required: false
+        type: int
+        default: 20
+      os_mirror_number:
+        description: How many mirrors to write after sorting.
+        required: false
+        type: int
+        default: 10
+      os_mirror_sort:
+        description: Reflector sort key.
+        required: false
+        type: str
+        default: rate
+      os_parallel_downloads:
+        description: Pacman ParallelDownloads value.
+        required: false
+        type: int
+        default: 5
+      os_pacman_noextract:
+        description: Pacman NoExtract entry that preserves the managed mirrorlist.
+        required: false
+        type: str
+        default: etc/pacman.d/mirrorlist
+      os_themis_local_packages:
+        description: 'THEMIS-only: local .pkg.tar.zst packages (place in role files/).'
+        required: false
+        type: list
+        elements: str
+        default:
+          - pikaur-1.33.2-1-any.pkg.tar.zst
+          - schedtoold-0.3-11-x86_64.pkg.tar.zst
+          - blesh-git-0.4.0_devel4.r2307.32bb63da-1-any.pkg.tar.zst
+          - python311-3.11.14-1-x86_64.pkg.tar.zst

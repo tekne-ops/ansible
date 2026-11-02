@@ -1,0 +1,118 @@
+---
+name: quality
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Check install profiles and layout boundaries
+        run: |
+          python3 install/tests/test_profiles.py
+          python3 install/tests/test_render_autoinstall.py
+          python3 tests/test_layout.py
+
+  collections:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        collection: [common, personal, work]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible tooling
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Install third-party collections
+        run: ansible-galaxy collection install -r requirements.yml -p .ansible/collections
+
+      - name: Yamllint
+        run: yamllint -c .yamllint "collections/ansible_collections/tekne/${{ matrix.collection }}"
+
+      - name: Ansible lint
+        env:
+          # ansible-lint cannot pass -i. Real runs stay fatal via ansible.cfg.
+          ANSIBLE_HOST_PATTERN_MISMATCH: warning
+        run: ansible-lint "collections/ansible_collections/tekne/${{ matrix.collection }}"
+
+      - name: Build the collection
+        working-directory: collections/ansible_collections/tekne/${{ matrix.collection }}
+        run: ansible-galaxy collection build --force --output-path "${GITHUB_WORKSPACE}/.build"
+
+      - name: Syntax-check role tests
+        env:
+          ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/collections:${{ github.workspace }}/.ansible/collections
+        run: |
+          status=0
+          for play in collections/ansible_collections/tekne/${{ matrix.collection }}/roles/*/tests/test.yml; do
+            echo "syntax-check ${play}"
+            ansible-playbook "${play}" --syntax-check || status=1
+          done
+          exit "${status}"
+
+      - name: Sanity checks
+        working-directory: collections/ansible_collections/tekne/${{ matrix.collection }}
+        env:
+          ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/collections:${{ github.workspace }}/.ansible/collections
+        run: |
+          ansible-test sanity --local --python 3.12 \
+            --test runtime-metadata \
+            --test changelog \
+            --test ansible-doc \
+            --test compile \
+            --test empty-init \
+            --test line-endings \
+            --test symlinks \
+            --test no-illegal-filenames
+
+  playbooks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible tooling
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Install third-party collections
+        run: ansible-galaxy collection install -r requirements.yml -p .ansible/collections
+
+      - name: Syntax-check playbooks
+        run: |
+          ansible-playbook playbooks/work/k8s.yml -i inventories/work/hosts.yml --syntax-check
+          ansible-playbook playbooks/personal/workstation.yml -i inventories/personal/hosts.yml --syntax-check
+          ansible-playbook playbooks/personal/server.yml -i inventories/personal/hosts.yml --syntax-check
+          ansible-playbook playbooks/personal/main.yml -i inventories/personal/hosts.yml --syntax-check
+          ansible-playbook playbooks/personal/onedrive-auth.yml -i inventories/personal/hosts.yml --syntax-check
+
+      - name: Lint playbooks
+        env:
+          ANSIBLE_HOST_PATTERN_MISMATCH: warning
+        run: ansible-lint playbooks/personal playbooks/work

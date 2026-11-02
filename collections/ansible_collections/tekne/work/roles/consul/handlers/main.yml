@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT-0
+---
+- name: Restart Consul container
+  community.docker.docker_container:
+    name: "{{ consul_container_name }}"
+    state: started
+    restart: true

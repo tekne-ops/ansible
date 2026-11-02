@@ -1,0 +1,6 @@
+---
+- name: Test tekne.common.libvirt
+  hosts: localhost
+  remote_user: root
+  roles:
+    - role: tekne.common.libvirt

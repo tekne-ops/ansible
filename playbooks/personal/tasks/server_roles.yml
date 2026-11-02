@@ -1,0 +1,65 @@
+---
+- name: Configure user accounts
+  ansible.builtin.import_role:
+    name: tekne.common.user
+  tags: [user]
+
+- name: Configure networking
+  ansible.builtin.import_role:
+    name: tekne.common.network
+  tags: [network-host]
+
+- name: Configure the operating system
+  ansible.builtin.import_role:
+    name: tekne.common.os
+  tags: [os]
+
+- name: Configure GPU drivers
+  ansible.builtin.import_role:
+    name: tekne.personal.gpu
+  tags: [gpu]
+
+- name: Configure nftables
+  ansible.builtin.import_role:
+    name: tekne.common.nftables
+  tags: [nftables]
+
+- name: Configure Docker
+  ansible.builtin.import_role:
+    name: tekne.common.docker
+  tags: [docker-host]
+
+- name: Configure libvirt
+  ansible.builtin.import_role:
+    name: tekne.common.libvirt
+  tags: [libvirt]
+
+- name: Configure HAProxy
+  ansible.builtin.import_role:
+    name: tekne.work.haproxy
+  tags: [haproxy]
+
+- name: Configure the tekne package repo
+  ansible.builtin.import_role:
+    name: tekne.personal.repotekne
+  tags: [repotekne]
+
+- name: Configure Gerbera
+  ansible.builtin.import_role:
+    name: tekne.personal.gerbera
+  tags: [gerbera]
+
+- name: Configure Consul
+  ansible.builtin.import_role:
+    name: tekne.work.consul
+  tags: [consul]
+
+- name: Configure Jenkins
+  ansible.builtin.import_role:
+    name: tekne.work.jenkins
+  tags: [jenkins]
+
+- name: Configure Hermes
+  ansible.builtin.import_role:
+    name: tekne.personal.hermes
+  tags: [hermes]

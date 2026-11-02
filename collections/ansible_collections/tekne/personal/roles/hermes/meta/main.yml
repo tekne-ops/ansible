@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Amazon EC2 instance for Hermes and its SSH bootstrap
+  namespace: tekne
+  role_name: hermes
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - aws
+    - ec2
+collections:
+  - amazon.aws
+  - community.general
+dependencies: []

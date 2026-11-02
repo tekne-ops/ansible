@@ -1,0 +1,149 @@
+# SPDX-License-Identifier: MIT-0
+---
+- name: Install OneDrive and desktop notification support
+  community.general.pacman:
+    name: "{{ [onedrive_package] + onedrive_notification_packages }}"
+    state: present
+    extra_args: '--noconfirm --needed'
+  tags:
+    - onedrive
+    - packages
+
+- name: Ensure /srv exists
+  ansible.builtin.file:
+    path: /srv
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - onedrive
+    - directories
+
+- name: Create OneDrive sync directory
+  ansible.builtin.file:
+    path: "{{ onedrive_sync_dir }}"
+    state: directory
+    owner: "{{ onedrive_owner }}"
+    group: "{{ onedrive_group }}"
+    mode: '0700'
+  tags:
+    - onedrive
+    - directories
+
+- name: Grant OneDrive owner full ACL on sync directory
+  ansible.posix.acl:
+    path: "{{ onedrive_sync_dir }}"
+    entity: "{{ onedrive_owner }}"
+    etype: user
+    permissions: rwx
+    state: present
+    recursive: true
+  tags:
+    - onedrive
+    - directories
+
+- name: Create OneDrive config directory
+  ansible.builtin.file:
+    path: "{{ onedrive_home }}/{{ onedrive_config_dir }}"
+    state: directory
+    owner: "{{ onedrive_owner }}"
+    group: "{{ onedrive_group }}"
+    mode: '0700'
+  tags:
+    - onedrive
+    - config
+
+- name: Create OneDrive log directory
+  ansible.builtin.file:
+    path: "{{ onedrive_home }}/{{ onedrive_config_dir }}/logs"
+    state: directory
+    owner: "{{ onedrive_owner }}"
+    group: "{{ onedrive_group }}"
+    mode: '0700'
+  tags:
+    - onedrive
+    - directories
+
+- name: Deploy OneDrive config
+  ansible.builtin.template:
+    src: onedrive.j2
+    dest: "{{ onedrive_home }}/{{ onedrive_config_dir }}/config"
+    owner: "{{ onedrive_owner }}"
+    group: "{{ onedrive_group }}"
+    mode: '0600'
+  tags:
+    - onedrive
+    - config
+
+- name: Deploy OneDrive sync_list
+  ansible.builtin.copy:
+    src: sync_list
+    dest: "{{ onedrive_home }}/{{ onedrive_config_dir }}/sync_list"
+    owner: "{{ onedrive_owner }}"
+    group: "{{ onedrive_group }}"
+    mode: '0600'
+  tags:
+    - onedrive
+    - config
+
+- name: Verify OneDrive package is installed
+  ansible.builtin.command:
+    cmd: "pacman -Q {{ onedrive_package }}"
+  register: onedrive_package_verify
+  changed_when: false
+  failed_when: onedrive_package_verify.rc != 0
+  tags:
+    - onedrive
+    - verify
+
+- name: Verify OneDrive was built with libnotify support
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/ldd
+      - /usr/bin/onedrive
+  register: onedrive_linked_libraries
+  changed_when: false
+  failed_when: "'libnotify.so' not in onedrive_linked_libraries.stdout"
+  tags:
+    - onedrive
+    - verify
+
+- name: Verify OneDrive sync directory
+  ansible.builtin.stat:
+    path: "{{ onedrive_sync_dir }}"
+  register: onedrive_sync_stat
+  tags:
+    - onedrive
+    - verify
+
+- name: Assert OneDrive sync directory is owned by dvaliente
+  ansible.builtin.assert:
+    that:
+      - onedrive_sync_stat.stat.exists
+      - onedrive_sync_stat.stat.isdir
+      - onedrive_sync_stat.stat.pw_name == onedrive_owner
+    fail_msg: "{{ onedrive_sync_dir }} must exist and be owned by {{ onedrive_owner }}"
+  tags:
+    - onedrive
+    - verify
+
+- name: Verify OneDrive config exists
+  ansible.builtin.stat:
+    path: "{{ onedrive_home }}/{{ onedrive_config_dir }}/config"
+  register: onedrive_config_verify
+  tags:
+    - onedrive
+    - verify
+
+- name: Display installation summary
+  ansible.builtin.debug:
+    msg: |
+      OneDrive Installation Summary:
+      ==============================
+      Package: {{ onedrive_package }}
+      Sync dir: {{ onedrive_sync_dir }} (owner={{ onedrive_owner }})
+      Config: {{ onedrive_config_verify.stat.exists }}
+  tags:
+    - onedrive
+    - verify

@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Jenkins CI container on the dockers network
+  namespace: tekne
+  role_name: jenkins
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - docker
+    - jenkins
+collections:
+  - community.docker
+dependencies: []

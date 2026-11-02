@@ -1,0 +1,6 @@
+---
+- name: Test tekne.personal.gaming
+  hosts: localhost
+  remote_user: root
+  roles:
+    - role: tekne.personal.gaming

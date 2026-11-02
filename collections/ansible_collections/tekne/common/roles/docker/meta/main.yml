@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Docker engine, daemon tuning, and the dockers bridge network
+  namespace: tekne
+  role_name: docker
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - docker
+collections:
+  - community.docker
+  - community.general
+dependencies: []

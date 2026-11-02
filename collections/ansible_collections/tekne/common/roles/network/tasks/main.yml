@@ -1,0 +1,495 @@
+---
+# =============================================================================
+# Network Configuration
+# =============================================================================
+# Order: deploy templates first, then flush handlers, then enable/restart
+# services so they load the new config before WiFi connect.
+
+- name: Show network hostname and whether WiFi/Ethernet units will deploy
+  ansible.builtin.debug:
+    msg:
+      network_hostname: "{{ network_hostname }}"
+      network_hostname_raw: "{{ network_hostname_raw }}"
+      deploy_wifi_unit: "{{ network_hostname in network_wifi_hosts }}"
+      deploy_ethernet_unit: "{{ network_hostname in network_ethernet_hosts }}"
+      network_wifi_hosts: "{{ network_wifi_hosts }}"
+      network_ethernet_hosts: "{{ network_ethernet_hosts }}"
+  tags:
+    - network-host
+
+- name: Copy WiFi network configuration (ASTER)
+  ansible.builtin.template:
+    src: 80-wifi-station.network.j2
+    dest: /etc/systemd/network/80-wifi-station.network
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_hostname in network_wifi_hosts
+  notify: Reload systemd-networkd
+  tags:
+    - network-host
+
+- name: Remove WiFi unit on hosts without iwd
+  ansible.builtin.file:
+    path: /etc/systemd/network/80-wifi-station.network
+    state: absent
+  when: network_hostname not in network_wifi_hosts
+  notify: Reload systemd-networkd
+  tags:
+    - network-host
+
+- name: Copy Ethernet network configuration
+  ansible.builtin.template:
+    src: 89-ethernet.network.j2
+    dest: /etc/systemd/network/89-ethernet.network
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_hostname in network_ethernet_hosts
+  notify: Reload systemd-networkd
+  tags:
+    - network-host
+
+- name: Remove Ethernet unit on bridged/server hosts
+  ansible.builtin.file:
+    path: /etc/systemd/network/89-ethernet.network
+    state: absent
+  when: network_hostname not in network_ethernet_hosts
+  notify: Reload systemd-networkd
+  tags:
+    - network-host
+
+- name: Ensure systemd-networkd-wait-online drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/systemd-networkd-wait-online.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - network-host
+
+- name: Wait for any routable link (do not require every NIC)
+  ansible.builtin.copy:
+    src: systemd-networkd-wait-online-any.conf
+    dest: /etc/systemd/system/systemd-networkd-wait-online.service.d/any.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd
+  tags:
+    - network-host
+
+- name: Enable systemd-networkd-wait-online
+  ansible.builtin.systemd:
+    name: systemd-networkd-wait-online.service
+    enabled: true
+    daemon_reload: true
+  tags:
+    - network-host
+
+# DNS policy: strict DoT to pinned Quad9/Google resolvers on every host.
+- name: Remove superseded network packages
+  community.general.pacman:
+    name:
+      - wpa_supplicant
+      - systemd-resolvconf
+    state: absent
+  tags:
+    - network-host
+    - packages
+
+- name: Point /etc/resolv.conf at the systemd-resolved stub
+  ansible.builtin.file:
+    src: /run/systemd/resolve/stub-resolv.conf
+    dest: /etc/resolv.conf
+    state: link
+    force: true
+    follow: false
+  when:
+    - network_resolved_manage | bool
+    - not network_install_chroot_phase | bool
+  tags:
+    - network-host
+    - dns
+
+- name: Ensure resolved.conf.d directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: network_resolved_manage | bool
+  tags:
+    - network-host
+    - dns
+
+- name: Remove obsolete resolved drop-in names
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/resolved.conf.d/95-dns-over-tls.conf
+    - /etc/systemd/resolved.conf.d/99-dns-over-tls.conf
+    - /etc/systemd/resolved.conf.d/99-dot-override.conf
+  when: network_resolved_manage | bool
+  notify: Restart systemd-resolved
+  tags:
+    - network-host
+    - dns
+
+- name: Deploy systemd-resolved DNS policy
+  ansible.builtin.template:
+    src: resolved-dns.conf.j2
+    dest: /etc/systemd/resolved.conf.d/95-dns.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_resolved_manage | bool
+  notify: Restart systemd-resolved
+  tags:
+    - network-host
+    - dns
+
+- name: Remove obsolete networkd DNS drop-in directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/network/80-wifi-station.network.d
+    - /etc/systemd/network/89-ethernet.network.d
+    - /etc/systemd/network/25-br0.network.d
+  notify: Reload systemd-networkd
+  tags:
+    - network-host
+    - dns
+
+# SSH and bridge (br0) network configuration
+- name: Ensure sshd_config.d directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: network_manage_bridge | bool
+  tags:
+    - network-host
+
+- name: Copy ssh.conf to sshd_config.d
+  ansible.builtin.copy:
+    src: ssh.conf
+    dest: /etc/ssh/sshd_config.d/ssh.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_manage_bridge | bool
+  tags:
+    - network-host
+
+- name: Copy 25-br0.netdev to systemd-network (THEMIS)
+  ansible.builtin.copy:
+    src: 25-br0.netdev
+    dest: /etc/systemd/network/25-br0.netdev
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_manage_bridge | bool
+  notify: Reload systemd-networkd
+  tags:
+    - network-host
+
+- name: Copy 25-br0-en.network to systemd-network (THEMIS)
+  ansible.builtin.copy:
+    src: 25-br0-en.network
+    dest: /etc/systemd/network/25-br0-en.network
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_manage_bridge | bool
+  notify: Reload systemd-networkd
+  tags:
+    - network-host
+
+- name: Deploy 25-br0.network with hostname (THEMIS)
+  ansible.builtin.template:
+    src: 25-br0.network.j2
+    dest: /etc/systemd/network/25-br0.network
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_manage_bridge | bool
+  notify: Reload systemd-networkd
+  tags:
+    - network-host
+
+- name: Flush handlers so networkd reloads with new config before enabling WiFi
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - network-host
+
+- name: Deploy TLP configuration (ASTER only)
+  ansible.builtin.copy:
+    src: tlp.conf
+    dest: /etc/tlp.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_manage_laptop | bool
+  notify: Restart TLP
+  tags:
+    - network-host
+    - wifi
+
+- name: Install laptop service packages (ASTER only)
+  community.general.pacman:
+    name: "{{ network_laptop_service_packages }}"
+    state: present
+    extra_args: "--noconfirm --needed"
+  when: network_manage_laptop | bool
+  tags:
+    - network-host
+    - wifi
+    - packages
+
+- name: Ensure iwd configuration directory exists (ASTER only)
+  ansible.builtin.file:
+    path: /etc/iwd
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: network_manage_laptop | bool
+  tags:
+    - network-host
+    - wifi
+
+- name: Deploy iwd main configuration (ASTER only)
+  ansible.builtin.copy:
+    src: iwd-main.conf
+    dest: /etc/iwd/main.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: network_manage_laptop | bool
+  tags:
+    - network-host
+    - wifi
+
+- name: Enable laptop services (ASTER only)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+  loop:
+    - bluetooth.service
+    - iwd.service
+    - thermald.service
+    - tlp.service
+    - bolt.service
+  when: network_manage_laptop | bool
+  tags:
+    - network-host
+    - wifi
+
+- name: Start laptop services (ASTER only)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+  loop:
+    - bluetooth.service
+    - iwd.service
+    - thermald.service
+    - tlp.service
+    - bolt.service
+  when:
+    - network_manage_laptop | bool
+    - not network_install_chroot_phase | bool
+  tags:
+    - network-host
+    - wifi
+
+- name: Enable network services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+  loop:
+    - systemd-networkd.service
+    - systemd-resolved.service
+  tags:
+    - network-host
+
+- name: Start network services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+  loop:
+    - systemd-networkd.service
+    - systemd-resolved.service
+  when: not network_install_chroot_phase | bool
+  tags:
+    - network-host
+
+- name: Disable acpid
+  ansible.builtin.systemd:
+    name: acpid.service
+    enabled: false
+    state: "{{ 'stopped' if not (network_install_chroot_phase | bool) else omit }}"
+  tags:
+    - network-host
+
+- name: Check whether outbound network is already up (ASTER)
+  ansible.builtin.shell: |
+    /usr/lib/systemd/systemd-networkd-wait-online --any --ipv4 --dns --timeout=3 \
+      && resolvectl query --cache=no archlinux.org
+  register: network_outbound_up
+  changed_when: false
+  failed_when: false
+  when:
+    - network_manage_laptop | bool
+    - network_connect_wifi | bool
+  tags:
+    - network-host
+    - wifi
+
+- name: Require WiFi passphrase for ASTER
+  ansible.builtin.assert:
+    that:
+      - network_wifi_passphrase is defined
+      - network_wifi_passphrase | length > 0
+    fail_msg: "network_wifi_passphrase (or os_wifi_passphrase in vault) must be set for ASTER WiFi connection."
+  when:
+    - network_manage_laptop | bool
+    - network_connect_wifi | bool
+    - network_outbound_up.rc | default(1) != 0
+  tags:
+    - network-host
+    - wifi
+
+- name: Prepare WiFi for live connect (ASTER)
+  when:
+    - network_manage_laptop | bool
+    - network_connect_wifi | bool
+    - network_outbound_up.rc | default(1) != 0
+  tags:
+    - network-host
+    - wifi
+  block:
+    - name: Load WiFi kernel module (ASTER)
+      community.general.modprobe:
+        name: "{{ network_wifi_driver_module }}"
+        state: present
+
+    - name: Unblock WiFi rfkill (ASTER)
+      ansible.builtin.command: rfkill unblock wifi
+      changed_when: false
+
+    - name: Start network services for live WiFi connect (ASTER)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - systemd-networkd.service
+        - systemd-resolved.service
+        - iwd.service
+
+    - name: Brief pause for WiFi netdev registration (ASTER)
+      ansible.builtin.pause:
+        seconds: 3
+
+- name: Resolve WiFi interface name (ASTER only, auto-detect)
+  ansible.builtin.shell: |
+    for iface in /sys/class/net/*; do
+      if [[ -d "${iface}/wireless" ]]; then
+        basename "${iface}"
+        exit 0
+      fi
+    done
+    exit 1
+  register: network_wifi_interface_cmd
+  until: network_wifi_interface_cmd.stdout | trim | length > 0
+  retries: "{{ network_wifi_detect_retries }}"
+  delay: "{{ network_wifi_detect_delay }}"
+  changed_when: false
+  when:
+    - network_manage_laptop | bool
+    - network_connect_wifi | bool
+    - network_outbound_up.rc | default(1) != 0
+    - network_wifi_interface | default('') | length == 0
+  tags:
+    - network-host
+    - wifi
+
+- name: Set WiFi interface for ASTER
+  ansible.builtin.set_fact:
+    network_wifi_interface_resolved: >-
+      {{
+        network_wifi_interface
+        if (network_wifi_interface | default('') | length > 0)
+        else ((network_wifi_interface_cmd.stdout | trim) | default('wlan0'))
+      }}
+  when:
+    - network_manage_laptop | bool
+    - network_connect_wifi | bool
+    - network_outbound_up.rc | default(1) != 0
+  tags:
+    - network-host
+    - wifi
+
+- name: Wait for WiFi interface to appear (ASTER only)
+  ansible.builtin.wait_for:
+    path: "/sys/class/net/{{ network_wifi_interface_resolved }}"
+    timeout: 15
+  when:
+    - network_manage_laptop | bool
+    - network_connect_wifi | bool
+    - network_outbound_up.rc | default(1) != 0
+  tags:
+    - network-host
+    - wifi
+
+- name: Connect to WiFi network (ASTER only)
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/iwctl
+      - station
+      - "{{ network_wifi_interface_resolved }}"
+      - connect
+      - "{{ network_wifi_ssid }}"
+      - --passphrase
+      - "{{ network_wifi_passphrase }}"
+  register: network_iwctl_connect
+  until: network_iwctl_connect.rc == 0
+  retries: 6
+  delay: 5
+  when:
+    - network_manage_laptop | bool
+    - network_connect_wifi | bool
+    - network_outbound_up.rc | default(1) != 0
+  changed_when: false
+  no_log: true
+  tags:
+    - network-host
+    - wifi
+
+# =============================================================================
+# Wait for Network Connectivity
+# =============================================================================
+
+- name: Flush handlers to reload networkd if config changed
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - network-host
+
+- name: Wait for IPv4 connectivity and DNS
+  ansible.builtin.shell: |
+    /usr/lib/systemd/systemd-networkd-wait-online --any --ipv4 --dns --timeout=5 \
+      && resolvectl query --cache=no archlinux.org
+  register: network_connectivity_check
+  until: network_connectivity_check.rc == 0
+  retries: 10
+  delay: 2
+  changed_when: false
+  when: not network_install_chroot_phase | bool
+  tags:
+    - network-host

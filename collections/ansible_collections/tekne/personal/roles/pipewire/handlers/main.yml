@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT-0
+---
+- name: Restart PipeWire user services
+  become: true
+  become_user: "{{ item.0.item.name }}"
+  ansible.builtin.systemd:
+    name: "{{ item.1 }}"
+    state: restarted
+    scope: user
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ item.0.item.uid }}"
+  loop: "{{ pipewire_user_runtime.results | product(pipewire_user_services) | list }}"
+  loop_control:
+    label: "{{ item.0.item.name }} {{ item.1 }}"
+  when:
+    - not pipewire_install_chroot_phase | bool
+    - item.0.stat.isdir | default(false)

@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Arch package repository container
+  namespace: tekne
+  role_name: repotekne
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - docker
+    - packages
+collections:
+  - community.docker
+dependencies: []

@@ -1,0 +1,70 @@
+---
+- name: Configure user accounts
+  ansible.builtin.import_role:
+    name: tekne.common.user
+  tags: [user]
+
+- name: Configure networking
+  ansible.builtin.import_role:
+    name: tekne.common.network
+  tags: [network-host]
+
+- name: Configure the operating system
+  ansible.builtin.import_role:
+    name: tekne.common.os
+  tags: [os]
+
+- name: Configure PipeWire
+  ansible.builtin.import_role:
+    name: tekne.personal.pipewire
+  tags: [pipewire]
+
+- name: Configure GPU drivers
+  ansible.builtin.import_role:
+    name: tekne.personal.gpu
+  tags: [gpu]
+
+- name: Configure XFCE
+  ansible.builtin.import_role:
+    name: tekne.personal.xfce4
+  tags: [xfce4]
+
+- name: Configure KDE Plasma
+  ansible.builtin.import_role:
+    name: tekne.personal.kde
+  tags: [kde]
+
+- name: Configure gaming packages
+  ansible.builtin.import_role:
+    name: tekne.personal.gaming
+  tags: [gaming]
+
+- name: Configure OneDrive
+  ansible.builtin.import_role:
+    name: tekne.personal.onedrive
+  tags: [onedrive]
+
+- name: Bootstrap the workstation
+  ansible.builtin.import_role:
+    name: tekne.personal.bootstrap
+  tags: [bootstrap]
+
+- name: Configure nftables
+  ansible.builtin.import_role:
+    name: tekne.common.nftables
+  tags: [nftables]
+
+- name: Configure Docker
+  ansible.builtin.import_role:
+    name: tekne.common.docker
+  tags: [docker-host]
+
+- name: Configure libvirt
+  ansible.builtin.import_role:
+    name: tekne.common.libvirt
+  tags: [libvirt]
+
+- name: Configure Hermes
+  ansible.builtin.import_role:
+    name: tekne.personal.hermes
+  tags: [hermes]

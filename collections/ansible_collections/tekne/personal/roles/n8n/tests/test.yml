@@ -1,0 +1,6 @@
+---
+- name: Test tekne.personal.n8n
+  hosts: localhost
+  remote_user: root
+  roles:
+    - role: tekne.personal.n8n

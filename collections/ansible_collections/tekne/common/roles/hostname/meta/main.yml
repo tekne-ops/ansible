@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Cache the remote hostname as an Ansible fact
+  namespace: tekne
+  role_name: hostname
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - hostname
+dependencies: []

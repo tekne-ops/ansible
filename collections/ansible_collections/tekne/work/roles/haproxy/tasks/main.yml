@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for ansible-role-haproxy
+
+- name: Create HAProxy directory
+  ansible.builtin.file:
+    path: /srv/docker/haproxy
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - haproxy
+    - config
+
+- name: Install and configure certbot for HAProxy TLS
+  ansible.builtin.import_tasks: certbot.yml
+  when: haproxy_certbot_enabled | bool
+  tags:
+    - haproxy
+    - certbot
+
+- name: Copy haproxy.cfg to /var/www/haproxy
+  ansible.builtin.copy:
+    src: haproxy.cfg
+    dest: /srv/docker/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart haproxy container
+  tags:
+    - haproxy
+    - config
+
+- name: Validate SSL PEM source (vault or path)
+  ansible.builtin.assert:
+    that:
+      - >-
+        (haproxy_ssl_pem is defined
+        and (haproxy_ssl_pem | default('') | trim | length > 0))
+        or (haproxy_ssl_pem_path is defined
+        and (haproxy_ssl_pem_path | default('') | trim | length > 0))
+    fail_msg: >-
+      Set haproxy_ssl_pem (in vault) or haproxy_ssl_pem_path (-e) to provide
+      the TLS cert+key for HAProxy. Do not commit the PEM file to the role.
+    success_msg: "SSL PEM source configured"
+  when: not (haproxy_certbot_enabled | bool)
+  tags:
+    - haproxy
+    - config
+
+- name: Deploy tekne.sv.pem to /var/www/haproxy
+  ansible.builtin.copy:
+    content: "{{ (haproxy_ssl_pem | default('')) if ((haproxy_ssl_pem | default('') | trim | length) > 0) else (lookup('file', haproxy_ssl_pem_path)) }}"
+    dest: /srv/docker/haproxy/tekne.sv.pem
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  diff: false
+  when: not (haproxy_certbot_enabled | bool)
+  tags:
+    - haproxy
+    - config
+
+- name: Create and start HAProxy container
+  community.docker.docker_container:
+    name: "{{ haproxy_container_name }}"
+    image: "{{ haproxy_container_image }}"
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    volumes:
+      - /srv/docker/haproxy/haproxy.cfg:/etc/haproxy/haproxy.cfg:ro
+      - /srv/docker/haproxy/tekne.sv.pem:/etc/ssl/private/tekne.sv.pem:ro
+    comparisons:
+      image: strict
+      volumes: strict
+  tags:
+    - haproxy
+    - docker

@@ -1,0 +1,295 @@
+# SPDX-License-Identifier: MIT-0
+---
+- name: Validate Hermes host configuration inputs
+  ansible.builtin.assert:
+    that:
+      - user_password is defined
+      - user_password | length > 0
+      - hermes_ssh_user | length > 0
+      - hermes_management_user in (hermes_users | map(attribute='name') | list)
+    fail_msg: >-
+      user_password must be loaded from vault and hermes_ssh_user must identify
+      the cloud-init bootstrap account.
+    quiet: true
+  no_log: true
+  become: false
+  tags: [hermes, configure]
+
+- name: Wait for initial SSH on Hermes instance
+  ansible.builtin.wait_for:
+    host: "{{ hermes_public_ip }}"
+    port: "{{ hermes_ssh_port_initial }}"
+    delay: 10
+    timeout: "{{ hermes_ssh_wait_timeout }}"
+  delegate_to: localhost
+  become: false
+  tags: [hermes, configure]
+
+- name: Add Hermes instance to the in-memory inventory
+  ansible.builtin.add_host:
+    name: hermes_managed
+    groups: hermes_targets
+    ansible_host: "{{ hermes_public_ip }}"
+    ansible_user: "{{ hermes_ssh_user }}"
+    ansible_port: "{{ hermes_ssh_port_initial }}"
+    ansible_ssh_private_key_file: "{{ hermes_ssh_private_key_file | default(omit, true) }}"
+    ansible_ssh_common_args: -o StrictHostKeyChecking=accept-new
+    ansible_become: true
+    ansible_become_method: sudo
+  no_log: true
+  tags: [hermes, configure]
+
+- name: Wait for Ansible connection to Hermes
+  ansible.builtin.wait_for_connection:
+    delay: 2
+    timeout: "{{ hermes_ssh_wait_timeout }}"
+  delegate_to: hermes_managed
+  become: false
+  tags: [hermes, configure]
+
+- name: Gather Hermes host facts
+  ansible.builtin.setup:
+  delegate_to: hermes_managed
+  delegate_facts: true
+  tags: [hermes, configure]
+
+- name: Ensure Hermes supplementary groups exist
+  ansible.builtin.group:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ hermes_supplementary_groups }}"
+  delegate_to: hermes_managed
+  tags: [hermes, configure]
+
+- name: Create Hermes users
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    password: "{{ user_password }}"
+    shell: /bin/bash
+    groups: "{{ item.groups | default(omit) }}"
+    append: true
+    create_home: true
+    state: present
+  loop: "{{ hermes_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: hermes_managed
+  no_log: true
+  tags: [hermes, configure]
+
+- name: Require vault SSH identity keys for Hermes
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', item) | length > 0
+    fail_msg: "Vault variable {{ item }} is missing or empty."
+    quiet: true
+  loop:
+    - id_rsa-dvaliente
+    - id_rsa-devops
+    - id_rsa.pub-dvaliente
+    - id_rsa.pub-devops
+  no_log: true
+  tags: [hermes, configure]
+
+- name: Ensure Hermes SSH directories exist
+  ansible.builtin.file:
+    path: "/home/{{ item.name }}/.ssh"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0700"
+  loop: "{{ hermes_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: hermes_managed
+  tags: [hermes, configure]
+
+- name: Install Hermes SSH identity keys from vault
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.vars', item.1 ~ '-' ~ item.0.name) | trim }}\n"
+    dest: "/home/{{ item.0.name }}/.ssh/{{ item.1 }}"
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "{{ '0600' if item.1 == 'id_rsa' else '0644' }}"
+  loop: "{{ hermes_users | product(['id_rsa', 'id_rsa.pub']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1 }}"
+  delegate_to: hermes_managed
+  no_log: true
+  diff: false
+  tags: [hermes, configure]
+
+- name: Configure Hermes authorized SSH keys from vault
+  ansible.posix.authorized_key:
+    user: "{{ item.name }}"
+    key: "{{ lookup('ansible.builtin.vars', 'id_rsa.pub-' ~ item.name) | trim }}"
+    exclusive: true
+    state: present
+  loop: "{{ hermes_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: hermes_managed
+  no_log: true
+  tags: [hermes, configure]
+
+- name: Install Hermes sudoers files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/sudoers.d/{{ item }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s
+  loop:
+    - sudo_dvaliente
+    - sudo_devops
+  delegate_to: hermes_managed
+  tags: [hermes, configure]
+
+- name: Install Docker repository prerequisites on Hermes
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  delegate_to: hermes_managed
+  tags: [hermes, configure, docker]
+
+- name: Install Docker repository signing key on Hermes
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: hermes_managed
+  tags: [hermes, configure, docker]
+
+- name: Add Docker apt repository on Hermes
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ hostvars['hermes_managed'].ansible_facts['architecture']
+      | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/debian
+      {{ hostvars['hermes_managed'].ansible_facts['distribution_release'] }} stable
+    filename: docker
+    state: present
+  delegate_to: hermes_managed
+  tags: [hermes, configure, docker]
+
+- name: Install Docker packages on Hermes
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+  delegate_to: hermes_managed
+  tags: [hermes, configure, docker]
+
+- name: Enable and start Docker on Hermes
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+  delegate_to: hermes_managed
+  tags: [hermes, configure, docker]
+
+- name: Add Hermes users to Docker group
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: docker
+    append: true
+  loop: "{{ hermes_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: hermes_managed
+  tags: [hermes, configure, docker]
+
+- name: Install Hermes SSH configuration
+  ansible.builtin.copy:
+    src: ssh.conf
+    dest: /etc/ssh/sshd_config.d/hermes.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: hermes_ssh_config
+  delegate_to: hermes_managed
+  tags: [hermes, configure, ssh]
+
+- name: Disable Hermes bootstrap administrator SSH access
+  ansible.builtin.copy:
+    src: ssh_disable_admin.conf
+    dest: /etc/ssh/sshd_config.d/disable-admin.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: hermes_ssh_disable_admin
+  delegate_to: hermes_managed
+  tags: [hermes, configure, ssh]
+
+- name: Validate Hermes sshd configuration
+  ansible.builtin.command:
+    cmd: sshd -t
+  changed_when: false
+  delegate_to: hermes_managed
+  when: hermes_ssh_config is changed or hermes_ssh_disable_admin is changed
+  tags: [hermes, configure, ssh]
+
+- name: Restart Hermes sshd after configuration changes
+  ansible.builtin.systemd:
+    name: sshd
+    state: restarted
+  delegate_to: hermes_managed
+  when: hermes_ssh_config is changed or hermes_ssh_disable_admin is changed
+  tags: [hermes, configure, ssh]
+
+- name: Switch Hermes inventory to the managed SSH account
+  ansible.builtin.add_host:
+    name: hermes_managed
+    groups: hermes_targets
+    ansible_host: "{{ hermes_public_ip }}"
+    ansible_user: "{{ hermes_management_user }}"
+    ansible_port: "{{ hermes_ssh_port }}"
+    ansible_ssh_private_key_file: "{{ hermes_ssh_private_key_file | default(omit, true) }}"
+    ansible_ssh_common_args: -o StrictHostKeyChecking=accept-new
+    ansible_become: true
+    ansible_become_method: sudo
+  no_log: true
+  tags: [hermes, configure, ssh]
+
+- name: Reset the Hermes SSH connection
+  ansible.builtin.meta: reset_connection
+  delegate_to: hermes_managed
+  tags: [hermes, configure, ssh]
+
+- name: Wait for managed Hermes SSH connection
+  ansible.builtin.wait_for_connection:
+    delay: 2
+    timeout: "{{ hermes_ssh_wait_timeout }}"
+  delegate_to: hermes_managed
+  become: false
+  tags: [hermes, configure, ssh]
+
+- name: Remove Hermes bootstrap administrator sudo access
+  ansible.builtin.file:
+    path: /etc/sudoers.d/99-ansible-bootstrap-admin
+    state: absent
+  delegate_to: hermes_managed
+  tags: [hermes, configure, ssh]
+
+- name: Wait for hardened SSH on Hermes instance
+  ansible.builtin.wait_for:
+    host: "{{ hermes_public_ip }}"
+    port: "{{ hermes_ssh_port }}"
+    delay: 5
+    timeout: "{{ hermes_ssh_wait_timeout }}"
+  delegate_to: localhost
+  become: false
+  tags: [hermes, configure, ssh]

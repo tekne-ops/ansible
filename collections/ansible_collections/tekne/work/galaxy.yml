@@ -1,0 +1,26 @@
+---
+namespace: tekne
+name: work
+version: 1.0.0
+readme: README.md
+authors:
+  - dvaliente
+license:
+  - MIT
+description: Tekne Kubernetes and service-platform roles
+repository: https://github.com/tekne-ops/ansible
+issues: https://github.com/tekne-ops/ansible/issues
+homepage: https://github.com/tekne-ops/ansible
+documentation: https://github.com/tekne-ops/ansible/tree/main/collections/ansible_collections/tekne/work
+tags:
+  - linux
+  - debian
+  - kubernetes
+  - server
+dependencies:
+  community.docker: '>=4.0.0'
+  community.general: '>=10.0.0'
+  tekne.common: '>=1.0.0'
+build_ignore:
+  - tests
+  - roles/*/tests

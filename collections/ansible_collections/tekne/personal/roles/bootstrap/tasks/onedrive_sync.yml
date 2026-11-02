@@ -1,0 +1,375 @@
+---
+# ============================================
+# FIRST SYNC
+# ============================================
+
+- name: Check if OneDrive has been synced before
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.stat:
+    path: "{{ bootstrap_onedrive_config_dir }}/items.sqlite3"
+  register: bootstrap_onedrive_db_check
+  tags: [bootstrap, onedrive, sync]
+
+- name: Read the stored OneDrive sync_list hash
+  ansible.builtin.slurp:
+    src: "{{ bootstrap_onedrive_config_dir }}/.sync_list.hash"
+  register: bootstrap_onedrive_sync_list_hash
+  failed_when: false
+  changed_when: false
+  when: bootstrap_onedrive_db_check.stat.exists
+  tags: [bootstrap, onedrive, sync]
+
+- name: Display skip message if already synced
+  ansible.builtin.debug:
+    msg:
+      - "OneDrive database already exists at {{ bootstrap_onedrive_config_dir }}/items.sqlite3"
+      - "Skipping first sync - OneDrive has been synced before"
+  when:
+    - bootstrap_onedrive_db_check.stat.exists
+    - bootstrap_onedrive_sync_list_hash.content is defined
+    - (bootstrap_onedrive_sync_list_hash.content | b64decode | trim) != 'initial-hash'
+  tags: [bootstrap, onedrive, sync]
+
+- name: Resync OneDrive so the installed sync_list is accepted
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.command:
+    argv: "{{ [bootstrap_onedrive_binary] + (bootstrap_onedrive_sync_options.split()) + ['--confdir=' ~ bootstrap_onedrive_config_dir] }}"
+  async: "{{ bootstrap_onedrive_sync_timeout }}"
+  poll: 0
+  register: bootstrap_onedrive_repair_sync
+  when:
+    - bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_sync_list_hash.content is not defined or (bootstrap_onedrive_sync_list_hash.content | b64decode | trim) == 'initial-hash'
+  tags: [bootstrap, onedrive, sync]
+
+- name: Wait for the OneDrive sync_list resync to finish
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.async_status:
+    jid: "{{ bootstrap_onedrive_repair_sync.ansible_job_id }}"
+  register: bootstrap_onedrive_repair_status
+  until: bootstrap_onedrive_repair_status.finished
+  retries: "{{ ((bootstrap_onedrive_sync_timeout | int) / 10) | round(0, 'ceil') | int }}"
+  delay: 10
+  when:
+    - not ansible_check_mode
+    - bootstrap_onedrive_repair_sync.ansible_job_id is defined
+  failed_when: bootstrap_onedrive_repair_status.finished and (bootstrap_onedrive_repair_status.rc | default(1) | int) != 0
+  tags: [bootstrap, onedrive, sync]
+
+- name: Explain how to authenticate OneDrive
+  ansible.builtin.debug:
+    msg: >-
+      OneDrive has no local database. This run does not prompt for Microsoft
+      sign-in. Run playbooks/onedrive-auth.sh once, then converge again.
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not (bootstrap_onedrive_interactive | bool)
+  tags: [bootstrap, onedrive, sync]
+
+- name: Remove stale OneDrive authentication log
+  ansible.builtin.file:
+    path: "{{ bootstrap_onedrive_auth_log }}"
+    state: absent
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+  tags: [bootstrap, onedrive, sync]
+
+- name: Start OneDrive first sync in background
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.command:
+    argv: "{{ bootstrap_onedrive_sync_argv }}"
+  vars:
+    bootstrap_onedrive_sync_argv: >-
+      {{
+        [
+          'script', '--quiet', '--return', '--flush',
+          bootstrap_onedrive_auth_log, '--',
+          bootstrap_onedrive_binary
+        ]
+        + bootstrap_onedrive_sync_options.split()
+        + ['--confdir=' ~ bootstrap_onedrive_config_dir]
+      }}
+  async: "{{ bootstrap_onedrive_sync_timeout }}"
+  poll: 0
+  register: bootstrap_onedrive_first_sync
+  changed_when: true
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+  tags: [bootstrap, onedrive, sync]
+
+- name: Wait for OneDrive authentication progress
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - -c
+      - |
+        log="$1"
+        pattern='https?://|Enter the following code|Enter the response uri'
+        pattern+='|could not be initialised|empty or invalid response'
+        for _ in $(seq 1 60); do
+          if [[ -f "$log" ]] && grep -E -q "$pattern" "$log"; then
+            exit 0
+          fi
+          sleep 1
+        done
+        printf '%s\n' 'OneDrive did not print authentication instructions within 60 seconds.' >&2
+        if [[ -f "$log" ]]; then
+          printf '%s\n' '----- OneDrive log -----' >&2
+          cat "$log" >&2
+        else
+          printf '%s\n' 'The OneDrive log was not created.' >&2
+        fi
+        exit 1
+      - bash
+      - "{{ bootstrap_onedrive_auth_log }}"
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+  changed_when: false
+  tags: [bootstrap, onedrive, sync]
+
+- name: Read OneDrive authentication instructions
+  ansible.builtin.slurp:
+    src: "{{ bootstrap_onedrive_auth_log }}"
+  register: bootstrap_onedrive_auth_instructions
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+  tags: [bootstrap, onedrive, sync]
+
+- name: Record OneDrive authentication log text
+  ansible.builtin.set_fact:
+    bootstrap_onedrive_auth_text: "{{ bootstrap_onedrive_auth_instructions.content | b64decode }}"
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+    - bootstrap_onedrive_auth_instructions.content is defined
+  tags: [bootstrap, onedrive, sync]
+
+- name: Fail when OneDrive expected a pasted redirect URI
+  ansible.builtin.fail:
+    msg: |
+      OneDrive asked for a browser redirect URI on standard input.
+      Device authentication did not start, so this run cannot answer that prompt.
+      {{ bootstrap_onedrive_auth_text }}
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+    - bootstrap_onedrive_auth_text is defined
+    - "'Enter the response uri' in bootstrap_onedrive_auth_text or 'empty or invalid response' in bootstrap_onedrive_auth_text"
+  tags: [bootstrap, onedrive, sync]
+
+- name: Display OneDrive authentication instructions
+  ansible.builtin.debug:
+    msg: "{{ bootstrap_onedrive_auth_text }}"
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+    - bootstrap_onedrive_auth_text is defined
+    - "'Enter the following code' in bootstrap_onedrive_auth_text or 'devicelogin' in bootstrap_onedrive_auth_text"
+  tags: [bootstrap, onedrive, sync]
+
+- name: Wait for user to authenticate with OneDrive
+  ansible.builtin.pause:
+    prompt: |
+
+      ==========================================
+      ONEDRIVE AUTHENTICATION REQUIRED
+      ==========================================
+
+      Look for the Microsoft URL and code in the output above.
+      If you don't see it, check the terminal where Ansible is running.
+
+      Steps:
+        1. Go to the URL
+        2. Type in the code
+        3. Sign in with your Microsoft account
+        4. Authorize the OneDrive application
+
+      Press Enter AFTER done, or Ctrl+C to abort.
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+    - bootstrap_onedrive_auth_text is defined
+    - "'Enter the following code' in bootstrap_onedrive_auth_text or 'devicelogin' in bootstrap_onedrive_auth_text"
+  tags: [bootstrap, onedrive, sync]
+
+- name: Wait for OneDrive first sync to finish
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.async_status:
+    jid: "{{ bootstrap_onedrive_first_sync.ansible_job_id }}"
+  register: bootstrap_onedrive_sync_status
+  until: bootstrap_onedrive_sync_status.finished
+  retries: "{{ ((bootstrap_onedrive_sync_timeout | int) / 10) | round(0, 'ceil') | int }}"
+  delay: 10
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+  tags: [bootstrap, onedrive, sync]
+
+- name: Display sync completion message
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "OneDrive first sync completed!"
+      - "Return code: {{ bootstrap_onedrive_sync_status.rc | default('N/A') }}"
+      - "=========================================="
+  when:
+    - not bootstrap_onedrive_db_check.stat.exists
+    - not ansible_check_mode
+    - bootstrap_onedrive_interactive | bool
+  tags: [bootstrap, onedrive, sync]
+
+# ============================================
+# DESKTOP-AWARE SERVICE STARTUP
+# ============================================
+
+- name: Get user UID for systemd user scope
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ bootstrap_user }}"
+  tags: [bootstrap, onedrive, service]
+
+- name: Check whether linger is already enabled
+  ansible.builtin.stat:
+    path: "/var/lib/systemd/linger/{{ bootstrap_user }}"
+  register: bootstrap_linger_file
+  tags: [bootstrap, onedrive, service]
+
+- name: Disable linger so OneDrive does not start before the graphical session
+  ansible.builtin.command:
+    argv:
+      - loginctl
+      - disable-linger
+      - "{{ bootstrap_user }}"
+  when: bootstrap_linger_file.stat.exists
+  changed_when: true
+  tags: [bootstrap, onedrive, service]
+
+- name: Ensure OneDrive desktop startup directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ bootstrap_user }}"
+    group: "{{ bootstrap_group }}"
+    mode: '0700'
+  loop:
+    - "{{ bootstrap_home }}/bin"
+    - "{{ bootstrap_home }}/.config/autostart"
+  tags: [bootstrap, onedrive, service]
+
+- name: Install desktop-aware OneDrive startup helper
+  ansible.builtin.copy:
+    src: onedrive-desktop-start
+    dest: "{{ bootstrap_home }}/bin/onedrive-desktop-start"
+    owner: "{{ bootstrap_user }}"
+    group: "{{ bootstrap_group }}"
+    mode: '0755'
+  tags: [bootstrap, onedrive, service]
+
+- name: Start OneDrive from the XFCE session
+  ansible.builtin.template:
+    src: onedrive-desktop-start.desktop.j2
+    dest: "{{ bootstrap_home }}/.config/autostart/onedrive-desktop-start.desktop"
+    owner: "{{ bootstrap_user }}"
+    group: "{{ bootstrap_group }}"
+    mode: '0644'
+  tags: [bootstrap, onedrive, service]
+
+- name: Reload systemd user daemon
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[bootstrap_user][1] }}"
+  tags: [bootstrap, onedrive, service]
+
+- name: Disable boot-time OneDrive user service enablement
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.systemd:
+    name: onedrive.service
+    enabled: false
+    scope: user
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[bootstrap_user][1] }}"
+  tags: [bootstrap, onedrive, service]
+
+- name: Check for the active desktop notification service
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/busctl
+      - --user
+      - call
+      - org.freedesktop.Notifications
+      - /org/freedesktop/Notifications
+      - org.freedesktop.Notifications
+      - GetServerInformation
+  register: bootstrap_notification_service
+  changed_when: false
+  failed_when: false
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[bootstrap_user][1] }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ansible_facts.getent_passwd[bootstrap_user][1] }}/bus"
+  tags: [bootstrap, onedrive, service]
+
+- name: Restart OneDrive after the desktop notification service is ready
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.systemd:
+    name: onedrive.service
+    state: restarted
+    scope: user
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[bootstrap_user][1] }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ansible_facts.getent_passwd[bootstrap_user][1] }}/bus"
+  when:
+    - not ansible_check_mode
+    - bootstrap_notification_service.rc == 0
+  tags: [bootstrap, onedrive, service]
+
+- name: Stop OneDrive when no graphical notification service is active
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.systemd:
+    name: onedrive.service
+    state: stopped
+    scope: user
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[bootstrap_user][1] }}"
+  when:
+    - not ansible_check_mode
+    - bootstrap_notification_service.rc != 0
+  tags: [bootstrap, onedrive, service]
+
+- name: Display OneDrive desktop startup message
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "OneDrive starts from XFCE after org.freedesktop.Notifications is ready."
+      - "Boot-time service enablement and user lingering are disabled."
+      - "Current desktop notification service available: {{ bootstrap_notification_service.rc == 0 }}"
+      - "To check status: systemctl --user status onedrive.service"
+      - "=========================================="
+  tags: [bootstrap, onedrive, service]

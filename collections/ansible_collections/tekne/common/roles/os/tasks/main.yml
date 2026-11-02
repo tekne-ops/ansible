@@ -1,0 +1,408 @@
+---
+# =============================================================================
+# System Configuration
+# =============================================================================
+
+- name: Ensure reflector config directory exists
+  ansible.builtin.file:
+    path: /etc/xdg/reflector
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - os
+    - system_config
+    - mirrors
+
+- name: Install the reflector steady-state policy
+  ansible.builtin.template:
+    src: reflector.conf.j2
+    dest: /etc/xdg/reflector/reflector.conf
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - os
+    - system_config
+    - mirrors
+
+# =============================================================================
+# CPU power / governor
+# =============================================================================
+
+- name: Set CPU governor in cpupower-service.conf
+  ansible.builtin.lineinfile:
+    path: /etc/default/cpupower-service.conf
+    regexp: "^#?GOVERNOR=.*"
+    line: "GOVERNOR='{{ os_cpupower_governor }}'"
+    create: true
+    mode: '0644'
+  when: os_hostname not in os_cpupower_skip_hosts
+  tags:
+    - os
+    - cpupower
+
+- name: Enable and start cpupower.service
+  ansible.builtin.systemd:
+    name: cpupower
+    enabled: true
+    state: "{{ 'stopped' if os_install_chroot_phase | bool else 'started' }}"
+  when: os_hostname in os_cpupower_start_hosts
+  tags:
+    - os
+    - cpupower
+
+- name: Enable and start irqbalance.service
+  ansible.builtin.systemd:
+    name: irqbalance
+    enabled: true
+    state: "{{ 'stopped' if os_install_chroot_phase | bool else 'started' }}"
+  when: os_hostname in os_irqbalance_start_hosts
+  tags:
+    - os
+    - cpupower
+
+- name: Disable irqbalance.service
+  ansible.builtin.systemd:
+    name: irqbalance
+    enabled: false
+    state: stopped
+  when:
+    - not (os_install_chroot_phase | bool)
+    - os_hostname in os_irqbalance_stop_hosts
+  tags:
+    - os
+    - cpupower
+
+- name: Enable weekly fstrim.timer (start on boot unless install chroot phase)
+  ansible.builtin.systemd:
+    name: fstrim.timer
+    enabled: true
+    state: "{{ 'stopped' if os_install_chroot_phase | bool else 'started' }}"
+  tags:
+    - os
+    - fstrim
+
+# Locale Configuration
+- name: Set system locale
+  ansible.builtin.lineinfile:
+    path: /etc/locale.conf
+    state: present
+    line: "LANG={{ os_locale }}"
+    create: true
+    mode: '0644'
+  tags:
+    - os
+    - locale
+
+- name: Enable locale in locale.gen
+  ansible.builtin.lineinfile:
+    path: /etc/locale.gen
+    regexp: '^#?{{ os_locale | regex_escape }}'
+    line: "{{ os_locale }} UTF-8"
+  notify: Generate locales
+  tags:
+    - os
+    - locale
+
+- name: Flush handlers to run locale-gen now
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - os
+    - locale
+
+# =============================================================================
+# THEMIS: cronie, cpupower config, irqbalance (enable and start)
+# cronie is in pacstrap_base_packages
+# =============================================================================
+
+- name: Enable THEMIS services (start on boot unless install chroot phase)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: "{{ 'stopped' if os_install_chroot_phase | bool else 'started' }}"
+  loop:
+    - cronie.service
+    - irqbalance.service
+    - sshd.service
+  when: os_manage_server_services | bool
+  tags:
+    - os
+    - themis_services
+
+# =============================================================================
+# Tekne bash repository and PATH (requires network)
+# =============================================================================
+
+# git is in pacstrap_base_packages
+
+- name: Ensure devs group exists (for /srv/code ownership)
+  ansible.builtin.group:
+    name: devs
+    state: present
+  when: os_clone_tekne_repos | bool
+  tags:
+    - os
+    - tekne_bash
+    - srv_code
+
+- name: Create /srv/code directory (group devs, no access for others)
+  ansible.builtin.file:
+    path: /srv/code/tekne
+    state: directory
+    owner: root
+    group: devs
+    mode: '0770'
+  when: os_clone_tekne_repos | bool
+  tags:
+    - os
+    - tekne_bash
+    - srv_code
+
+- name: Clone tekne bash repository into /srv/code/tekne/bash
+  ansible.builtin.git:
+    repo: https://github.com/tekne-ops/bash
+    dest: /srv/code/tekne/bash
+    version: main
+    force: false
+  environment:
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+    GIT_CONFIG_VALUE_0: "Authorization: Basic {{ ('x-access-token:' ~ git_token) | b64encode }}"
+  no_log: true
+  when: os_clone_tekne_repos | bool
+  tags:
+    - os
+    - tekne_bash
+
+- name: Clone tekne python repository into /srv/code/tekne/python
+  ansible.builtin.git:
+    repo: https://github.com/tekne-ops/python
+    dest: /srv/code/tekne/python
+    version: main
+    force: false
+  environment:
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+    GIT_CONFIG_VALUE_0: "Authorization: Basic {{ ('x-access-token:' ~ git_token) | b64encode }}"
+  no_log: true
+  when: os_clone_tekne_repos | bool
+  tags:
+    - os
+    - tekne_python
+
+- name: Create /srv/code/tekne/ansible directory
+  ansible.builtin.file:
+    path: /srv/code/tekne/ansible
+    state: directory
+    owner: root
+    group: devs
+    mode: '0770'
+  when: os_clone_tekne_repos | bool
+  tags:
+    - os
+    - tekne_ansible
+
+- name: Clone the ansible repository into /srv/code/tekne/ansible
+  ansible.builtin.git:
+    repo: https://github.com/tekne-ops/ansible
+    dest: /srv/code/tekne/ansible
+    version: main
+    force: false
+  environment:
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+    GIT_CONFIG_VALUE_0: "Authorization: Basic {{ ('x-access-token:' ~ git_token) | b64encode }}"
+  no_log: true
+  when: os_clone_tekne_repos | bool
+  tags:
+    - os
+    - tekne_ansible
+
+- name: Add tekne bash paths to /etc/profile via profile.d
+  ansible.builtin.copy:
+    dest: /etc/profile.d/tekne-bash.sh
+    content: |
+      # Tekne bash utilities - scripts and bin in PATH
+      append_path() {
+        case ":$PATH:" in
+          *:"$1":*) ;;
+          *) PATH="${PATH:+"$PATH:"}$1" ;;
+        esac
+      }
+      append_path '/srv/code/tekne/bash/scripts'
+      append_path '/srv/code/tekne/bash/bin'
+      append_path '/srv/code/tekne/python/src/tekne_tools'
+    owner: root
+    group: root
+    mode: '0644'
+  when: os_clone_tekne_repos | bool
+  tags:
+    - os
+    - tekne_bash
+
+# =============================================================================
+# NTP Configuration (requires network)
+# =============================================================================
+
+- name: Enable NTP synchronization
+  ansible.builtin.command:
+    cmd: /usr/bin/timedatectl set-ntp true
+  changed_when: false
+  tags:
+    - os
+    - ntp
+
+# =============================================================================
+# Mirror Configuration (requires network to be up)
+# =============================================================================
+
+- name: Limit pacman parallel downloads
+  ansible.builtin.lineinfile:
+    path: /etc/pacman.conf
+    regexp: '^#?\s*ParallelDownloads\s*='
+    line: "ParallelDownloads = {{ os_parallel_downloads }}"
+    insertafter: '^\[options\]'
+  tags:
+    - os
+    - mirrors
+
+- name: Keep pacman-mirrorlist from replacing the managed mirrorlist
+  ansible.builtin.lineinfile:
+    path: /etc/pacman.conf
+    regexp: '^#?\s*NoExtract\s*='
+    line: "NoExtract = {{ os_pacman_noextract }}"
+    insertafter: '^\[options\]'
+  tags:
+    - os
+    - mirrors
+
+- name: Generate pacman mirrorlist candidate
+  ansible.builtin.command:
+    cmd: >-
+      /usr/bin/reflector
+      --protocol {{ os_mirror_protocols }}
+      --age {{ os_mirror_age }}
+      --latest {{ os_mirror_latest }}
+      --number {{ os_mirror_number }}
+      --sort {{ os_mirror_sort }}
+      --save /tmp/ansible-pacman-mirrorlist
+  changed_when: false
+  tags:
+    - os
+    - mirrors
+
+- name: Read the reflector candidate
+  ansible.builtin.slurp:
+    src: /tmp/ansible-pacman-mirrorlist
+  register: os_mirrorlist_candidate
+  tags:
+    - os
+    - mirrors
+
+- name: Require the reflector candidate to list servers
+  ansible.builtin.assert:
+    that:
+      - (os_mirrorlist_candidate.content | b64decode) is search('(?m)^Server = ')
+    fail_msg: Reflector wrote a mirrorlist with no Server entries.
+  tags:
+    - os
+    - mirrors
+
+- name: Install pacman mirrorlist when changed
+  ansible.builtin.copy:
+    src: /tmp/ansible-pacman-mirrorlist
+    dest: /etc/pacman.d/mirrorlist
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - os
+    - mirrors
+
+- name: Enable the weekly reflector timer
+  ansible.builtin.systemd:
+    name: reflector.timer
+    enabled: true
+    state: "{{ 'stopped' if os_install_chroot_phase | bool else 'started' }}"
+  tags:
+    - os
+    - mirrors
+
+- name: Keep reflector from running on every boot
+  ansible.builtin.systemd:
+    name: reflector.service
+    enabled: false
+  tags:
+    - os
+    - mirrors
+
+# =============================================================================
+# Tekne bash scripts and bin – make all files executable
+# =============================================================================
+
+- name: Set directory permissions
+  ansible.builtin.find:
+    paths: /srv/code
+    file_type: directory
+  register: os_directories
+  when: os_clone_tekne_repos | bool
+
+- name: Apply directory mode
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: '0775'
+    owner: root
+    group: devs
+  loop: "{{ os_directories.files }}"
+  when: os_clone_tekne_repos | bool
+
+- name: Set file permissions
+  ansible.builtin.find:
+    paths: /srv/code
+    file_type: file
+  register: os_files
+  when: os_clone_tekne_repos | bool
+
+- name: Apply file mode
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: '0664'
+    owner: root
+    group: devs
+  loop: "{{ os_files.files }}"
+  when: os_clone_tekne_repos | bool
+
+- name: Find all files in bash scripts and bin directories
+  ansible.builtin.find:
+    paths: "{{ item }}"
+    recurse: true
+    file_type: file
+  register: os_bash_find_result
+  loop:
+    - /srv/code/tekne/bash/scripts
+    - /srv/code/tekne/bash/bin
+  when: os_clone_tekne_repos | bool
+  tags:
+    - os
+    - bash_executable
+
+- name: Make all files in bash scripts and bin executable
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: '0775'
+  loop: >-
+    {{
+      os_bash_find_result.results | selectattr('files')
+      | map(attribute='files') | flatten | map(attribute='path') | list
+    }}
+  when:
+    - os_clone_tekne_repos | bool
+    - os_bash_find_result.results is defined
+  loop_control:
+    label: "{{ item }}"
+  tags:
+    - os
+    - bash_executable

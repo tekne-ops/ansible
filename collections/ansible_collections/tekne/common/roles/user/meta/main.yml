@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: System users, SSH authorized keys, sudoers, and dotfiles
+  namespace: tekne
+  role_name: user
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - ssh
+    - users
+collections:
+  - ansible.posix
+dependencies: []

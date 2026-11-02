@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: systemd-networkd, WiFi, DNS policy, and the THEMIS bridge
+  namespace: tekne
+  role_name: network
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - network
+    - wifi
+collections:
+  - community.general
+dependencies: []

@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT-0
+---
+# handlers file for ansible-role-haproxy
+
+- name: Restart haproxy container
+  community.docker.docker_container:
+    name: "{{ haproxy_container_name }}"
+    state: started
+    restart: true

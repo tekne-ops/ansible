@@ -1,0 +1,28 @@
+---
+# Server entrypoint for THEMIS. Service roles come from tekne.work.
+#
+#   ansible-playbook playbooks/personal/server.yml -i inventories/personal/hosts.yml --ask-vault-pass
+
+- name: Configure server
+  hosts: servers
+  connection: local
+  become: true
+
+  vars:
+    tekne_allowed_hostnames:
+      - THEMIS
+
+  pre_tasks:
+    - name: Assert the personal inventory context
+      ansible.builtin.assert:
+        that:
+          - tekne_context == "personal"
+        fail_msg: playbooks/personal/server.yml requires inventories/personal (tekne_context=personal).
+      tags: [always]
+
+    - name: Assert the server host profile
+      ansible.builtin.import_tasks: tasks/hostname.yml
+
+  tasks:
+    - name: Apply server roles
+      ansible.builtin.import_tasks: tasks/server_roles.yml

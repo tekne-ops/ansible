@@ -1,0 +1,6 @@
+---
+- name: Test tekne.personal.gerbera
+  hosts: localhost
+  remote_user: root
+  roles:
+    - role: tekne.personal.gerbera

@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: n8n workflow automation container on the dockers network
+  namespace: tekne
+  role_name: n8n
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - docker
+    - n8n
+collections:
+  - community.docker
+dependencies: []

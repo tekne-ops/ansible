@@ -1,0 +1,7 @@
+---
+- name: Test tekne.work.k8s
+  hosts: k8s_cluster
+  become: true
+  gather_facts: true
+  roles:
+    - role: tekne.work.k8s

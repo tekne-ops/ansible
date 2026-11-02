@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: XFCE desktop, themes, portals, and LightDM
+  namespace: tekne
+  role_name: xfce4
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - desktop
+    - xfce
+collections:
+  - community.general
+dependencies: []

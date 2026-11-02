@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: MIT-0
+---
+# defaults file for ./ansible-role-gpu
+
+# Skip archlinux.org ping during arch-chroot (live ISO already has network)
+gpu_install_chroot_phase: "{{ install_chroot_phase | default(false) }}"
+
+# Host profiles choose the GPU class. An unmatched host gets the Intel/Mesa path.
+gpu_nvidia_hostnames: []
+gpu_hybrid_hostnames: []
+gpu_intel_hostnames: []
+
+# NVIDIA packages (YUGEN discrete, ASTER hybrid)
+gpu_nvidia_packages:
+  - lib32-opencl-nvidia-tkg
+  - lib32-vulkan-icd-loader
+  - lib32-nvidia-utils-tkg
+  - nvidia-open-dkms-tkg
+  - nvidia-settings-tkg
+  - opencl-nvidia-tkg
+  - vulkan-icd-loader
+  - nvidia-utils-tkg
+
+# Extra packages for hybrid PRIME offload (ASTER)
+gpu_hybrid_extra_packages:
+  - nvidia-prime
+
+# Intel/Mesa packages (THEMIS, KVM, ASTER hybrid iGPU)
+gpu_intel_packages:
+  - mesa
+  - lib32-mesa
+  - vulkan-intel
+  - lib32-vulkan-intel
+  - intel-media-driver

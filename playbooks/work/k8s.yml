@@ -1,0 +1,22 @@
+---
+# Kubernetes node prerequisites on Debian 13
+# (kubelet, kubeadm, kubectl, containerd).
+#
+#   ansible-playbook playbooks/work/k8s.yml -i inventories/work/hosts.yml
+
+- name: Prepare Kubernetes hosts
+  hosts: k8s_cluster
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Assert the work inventory context
+      ansible.builtin.assert:
+        that:
+          - tekne_context == "work"
+        fail_msg: playbooks/work/k8s.yml requires inventories/work (tekne_context=work).
+      tags: [always]
+
+  roles:
+    - role: tekne.work.k8s
+      tags: [k8s]

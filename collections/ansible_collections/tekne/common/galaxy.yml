@@ -1,0 +1,27 @@
+---
+namespace: tekne
+name: common
+version: 1.0.0
+readme: README.md
+authors:
+  - dvaliente
+license:
+  - MIT
+description: Shared Tekne host baseline roles
+repository: https://github.com/tekne-ops/ansible
+issues: https://github.com/tekne-ops/ansible/issues
+homepage: https://github.com/tekne-ops/ansible
+documentation: https://github.com/tekne-ops/ansible/tree/main/collections/ansible_collections/tekne/common
+tags:
+  - linux
+  - archlinux
+  - networking
+  - server
+  - workstation
+dependencies:
+  ansible.posix: '>=1.5.0'
+  community.docker: '>=4.0.0'
+  community.general: '>=10.0.0'
+build_ignore:
+  - tests
+  - roles/*/tests

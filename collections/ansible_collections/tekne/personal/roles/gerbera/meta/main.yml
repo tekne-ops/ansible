@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Gerbera UPnP and DLNA media server container
+  namespace: tekne
+  role_name: gerbera
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - docker
+    - media
+collections:
+  - community.docker
+dependencies: []

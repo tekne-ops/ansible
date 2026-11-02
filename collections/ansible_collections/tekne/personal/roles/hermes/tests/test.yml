@@ -1,0 +1,6 @@
+---
+- name: Test tekne.personal.hermes
+  hosts: localhost
+  remote_user: root
+  roles:
+    - role: tekne.personal.hermes

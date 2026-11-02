@@ -1,0 +1,6 @@
+---
+- name: Test tekne.common.user
+  hosts: localhost
+  remote_user: root
+  roles:
+    - role: tekne.common.user

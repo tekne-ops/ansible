@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT-0
+---
+# defaults file for ansible-role-docker
+
+docker_hostname: "{{ hostname | default(ansible_facts['hostname']) | upper }}"
+
+# Hosts that receive daemon.json performance tuning.
+# Membership comes from inventories/host_profiles.
+docker_daemon_json_hosts: []
+
+docker_daemon_json_dest: /etc/docker/daemon.json
+
+docker_network_name: dockers
+docker_network_subnet: 192.168.75.0/24
+
+# Containers cannot use the host stub 127.0.0.53. LAN gateway first, Quad9 backup.
+docker_dns_servers:
+  - 192.168.135.1
+  - 9.9.9.9

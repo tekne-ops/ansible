@@ -1,0 +1,8 @@
+[Match]
+Name=en*
+
+[Network]
+Bridge=br0
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+IPv6SendRA=no

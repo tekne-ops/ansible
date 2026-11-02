@@ -1,0 +1,6 @@
+---
+- name: Test tekne.work.haproxy
+  hosts: localhost
+  remote_user: root
+  roles:
+    - role: tekne.work.haproxy

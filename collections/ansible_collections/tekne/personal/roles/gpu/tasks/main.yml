@@ -1,0 +1,166 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for ./ansible-role-gpu
+
+# =============================================================================
+# Network Connectivity Check
+# =============================================================================
+
+- name: Wait for network connectivity before package installation
+  ansible.builtin.command:
+    cmd: ping -c 1 -W 2 archlinux.org
+  register: gpu_network_check
+  until: gpu_network_check.rc == 0
+  retries: 30
+  delay: 2
+  changed_when: false
+  when: not gpu_install_chroot_phase | bool
+  tags:
+    - gpu
+    - network
+    - packages
+
+# =============================================================================
+# GPU Driver Installation
+# =============================================================================
+
+- name: Set effective hostname for GPU role
+  ansible.builtin.set_fact:
+    gpu_effective_hostname: >-
+      {{
+        (hostname | default(cached_hostname | default(ansible_facts['hostname'])))
+        | upper
+      }}
+  tags:
+    - gpu
+    - config
+    - packages
+    - nvidia
+    - intel
+    - verify
+
+- name: Set GPU type and package list based on hostname
+  ansible.builtin.set_fact:
+    gpu_type: >-
+      {{
+        'hybrid' if gpu_effective_hostname in gpu_hybrid_hostnames
+        else ('nvidia' if gpu_effective_hostname in gpu_nvidia_hostnames else 'intel')
+      }}
+    gpu_packages: >-
+      {{
+        (gpu_nvidia_packages + gpu_intel_packages + gpu_hybrid_extra_packages)
+        if gpu_effective_hostname in gpu_hybrid_hostnames
+        else (gpu_nvidia_packages if gpu_effective_hostname in gpu_nvidia_hostnames else gpu_intel_packages)
+      }}
+  tags:
+    - gpu
+    - config
+    - packages
+    - nvidia
+    - intel
+    - verify
+
+- name: Display GPU configuration
+  ansible.builtin.debug:
+    msg: "Host: {{ gpu_effective_hostname }} | GPU Type: {{ gpu_type }} | Packages: {{ gpu_packages | length }}"
+  tags:
+    - gpu
+    - config
+
+# =============================================================================
+# NVIDIA Installation (YUGEN discrete, ASTER hybrid)
+# =============================================================================
+
+- name: Install NVIDIA packages
+  community.general.pacman:
+    name: "{{ gpu_nvidia_packages }}"
+    state: present
+    extra_args: '--noconfirm --needed'
+  register: gpu_nvidia_install_result
+  when: gpu_type in ['nvidia', 'hybrid']
+  tags:
+    - gpu
+    - nvidia
+    - packages
+
+- name: Install hybrid PRIME packages (ASTER)
+  community.general.pacman:
+    name: "{{ gpu_hybrid_extra_packages }}"
+    state: present
+    extra_args: '--noconfirm --needed'
+  register: gpu_hybrid_install_result
+  when: gpu_type == 'hybrid'
+  tags:
+    - gpu
+    - nvidia
+    - packages
+
+# =============================================================================
+# Intel/Mesa Installation (THEMIS, KVM, ASTER hybrid)
+# =============================================================================
+
+- name: Install Intel/Mesa packages
+  community.general.pacman:
+    name: "{{ gpu_intel_packages }}"
+    state: present
+    extra_args: '--noconfirm --needed'
+  register: gpu_intel_install_result
+  when: gpu_type in ['intel', 'hybrid']
+  tags:
+    - gpu
+    - intel
+    - packages
+
+# =============================================================================
+# Verification
+# =============================================================================
+
+- name: Verify NVIDIA packages are installed
+  ansible.builtin.command:
+    cmd: "pacman -Q {{ item }}"
+  loop: "{{ gpu_nvidia_packages }}"
+  register: gpu_nvidia_package_verify
+  changed_when: false
+  failed_when: gpu_nvidia_package_verify.rc != 0
+  when: gpu_type in ['nvidia', 'hybrid']
+  tags:
+    - gpu
+    - verify
+    - nvidia
+
+- name: Verify hybrid PRIME packages are installed
+  ansible.builtin.command:
+    cmd: "pacman -Q {{ item }}"
+  loop: "{{ gpu_hybrid_extra_packages }}"
+  register: gpu_hybrid_package_verify
+  changed_when: false
+  failed_when: gpu_hybrid_package_verify.rc != 0
+  when: gpu_type == 'hybrid'
+  tags:
+    - gpu
+    - verify
+    - nvidia
+
+- name: Verify Intel/Mesa packages are installed
+  ansible.builtin.command:
+    cmd: "pacman -Q {{ item }}"
+  loop: "{{ gpu_intel_packages }}"
+  register: gpu_intel_package_verify
+  changed_when: false
+  failed_when: gpu_intel_package_verify.rc != 0
+  when: gpu_type in ['intel', 'hybrid']
+  tags:
+    - gpu
+    - verify
+    - intel
+
+- name: Display GPU installation summary
+  ansible.builtin.debug:
+    msg: |
+      GPU Installation Summary for {{ gpu_effective_hostname }}:
+      =============================================
+      GPU Type: {{ gpu_type | upper }}
+      Packages: {{ gpu_packages | join(', ') }}
+  tags:
+    - gpu
+    - verify

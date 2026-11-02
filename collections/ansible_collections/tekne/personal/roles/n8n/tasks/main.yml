@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for n8n
+
+- name: Create n8n Docker volume
+  community.docker.docker_volume:
+    name: "{{ n8n_volume_name }}"
+    state: present
+  tags:
+    - n8n
+    - docker
+
+- name: Create and start n8n container
+  community.docker.docker_container:
+    name: "{{ n8n_container_name }}"
+    image: "{{ n8n_docker_image }}"
+    state: started
+    restart_policy: unless-stopped
+    env:
+      GENERIC_TIMEZONE: "{{ n8n_timezone }}"
+      TZ: "{{ n8n_timezone }}"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_RUNNERS_ENABLED: "true"
+    networks:
+      - name: "{{ n8n_docker_network }}"
+        ipv4_address: "{{ n8n_docker_ip }}"
+    volumes:
+      - "{{ n8n_volume_name }}:/home/node/.n8n"
+    comparisons:
+      image: strict
+      networks: strict
+      volumes: strict
+  tags:
+    - n8n
+    - docker

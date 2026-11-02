@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Steam, Lutris, Wine, gamemode, and gaming host limits
+  namespace: tekne
+  role_name: gaming
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - gaming
+    - steam
+collections:
+  - community.general
+dependencies: []

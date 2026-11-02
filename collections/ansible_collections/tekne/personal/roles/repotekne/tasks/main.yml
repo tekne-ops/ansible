@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for ansible-role-repotekne
+
+- name: Create repotekne directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ repotekne_data_dir }}"
+    - "{{ repotekne_cache_dir }}"
+  tags:
+    - repotekne
+    - config
+
+- name: Create and start repotekne container
+  community.docker.docker_container:
+    name: "{{ repotekne_container_name }}"
+    image: "{{ repotekne_container_image }}"
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ repotekne_docker_network }}"
+        ipv4_address: "{{ repotekne_docker_ip }}"
+    volumes:
+      - "{{ repotekne_data_dir }}:/var/local/repo/tekne"
+      - "{{ repotekne_cache_dir }}:/tmp/aur-build-tekne"
+    comparisons:
+      image: strict
+      networks: strict
+      volumes: strict
+  tags:
+    - repotekne
+    - docker
+
+- name: Wait for repotekne container to be available
+  community.docker.docker_container_exec:
+    container: "{{ repotekne_container_name }}"
+    command: /usr/bin/true
+  register: repotekne_wait
+  until: repotekne_wait.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  tags:
+    - repotekne
+    - docker
+    - setup
+
+- name: Configure repotekne container once per setup version
+  community.docker.docker_container_exec:
+    container: "{{ repotekne_container_name }}"
+    command: >-
+      /bin/bash -lc '
+      marker=/var/local/repo/tekne/.ansible-setup-{{ repotekne_setup_version }};
+      test -e "$marker" && exit 0;
+      ln -sf /usr/bin/vim /usr/bin/vi;
+      printf "%s\n" "repo ALL=(ALL:ALL) ALL" "repo ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/repo;
+      id -u repo >/dev/null 2>&1 || useradd --system -m -s /usr/bin/nologin repo;
+      usermod -aG wheel repo;
+      install -d -o repo -g repo /home/repo /srv/code/tekne /var/local/repo/tekne;
+      sed -i "s|/usr/share/nginx/html|/var/local/repo/tekne|g" /etc/nginx/nginx.conf;
+      test -d /srv/code/tekne/bash || sudo -u repo git clone https://github.com/tekne-ops/bash /srv/code/tekne/bash;
+      chown -R repo:repo /srv/code /var/local/repo/tekne;
+      touch "$marker";
+      echo CHANGED'
+  register: repotekne_setup
+  changed_when: "'CHANGED' in repotekne_setup.stdout"
+  notify: Restart repotekne container
+  tags:
+    - repotekne
+    - setup

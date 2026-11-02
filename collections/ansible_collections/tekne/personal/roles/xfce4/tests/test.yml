@@ -1,0 +1,6 @@
+---
+- name: Test tekne.personal.xfce4
+  hosts: localhost
+  remote_user: root
+  roles:
+    - role: tekne.personal.xfce4

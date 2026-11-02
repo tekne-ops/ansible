@@ -1,0 +1,12 @@
+---
+profile: production
+exclude_paths:
+  - .git/
+  - .ansible/
+  - .build/
+  - inventories/personal/group_vars/all/vault.yml
+kinds:
+  - playbook: "playbooks/{personal,work}/*.yml"
+  - playbook: "collections/ansible_collections/tekne/*/roles/*/tests/test.yml"
+  - playbook: "collections/ansible_collections/tekne/*/tests/*.yml"
+  - role-arg-spec: "collections/ansible_collections/tekne/*/roles/*/meta/argument_specs.yml"

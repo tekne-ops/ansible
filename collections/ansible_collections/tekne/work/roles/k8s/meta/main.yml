@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: Debian Kubernetes node preparation with kubeadm, containerd, and Calico
+  namespace: tekne
+  role_name: k8s
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: Debian
+      versions:
+        - all
+  galaxy_tags:
+    - debian
+    - kubernetes
+    - kubeadm
+dependencies: []

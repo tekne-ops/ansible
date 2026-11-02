@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: NVIDIA or Intel and Mesa GPU drivers selected by hostname
+  namespace: tekne
+  role_name: gpu
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - gpu
+    - nvidia
+collections:
+  - community.general
+dependencies: []

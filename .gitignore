@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Ansible local state. Third-party collections install into .ansible/collections.
+.ansible/
+*.retry
+.build/
+requirements-chroot.yml
+
+# Vault passwords never belong in the repo.
+.vault_pass
+**/.vault_pass
+
+# install/lib is the profile loader, not a Python packaging lib/.
+!install/lib/
+!install/lib/**

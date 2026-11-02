@@ -1,0 +1,408 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for consul
+
+- name: Create consul directory
+  ansible.builtin.file:
+    path: "{{ consul_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - consul
+    - config
+
+- name: Create Consul data directory
+  ansible.builtin.file:
+    path: "{{ consul_data_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - consul
+    - config
+
+- name: Create and start Consul container
+  community.docker.docker_container:
+    name: "{{ consul_container_name }}"
+    image: "{{ consul_docker_image }}"
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ consul_docker_network }}"
+        ipv4_address: "{{ consul_docker_ip }}"
+    volumes:
+      - "{{ consul_data_directory }}:/consul/data"
+      - "{{ consul_directory }}:/consul/config"
+    comparisons:
+      image: strict
+      networks: strict
+      volumes: strict
+  register: consul_container
+  tags:
+    - consul
+    - docker
+
+- name: Wait for consul container to be available
+  community.docker.docker_container_exec:
+    container: "{{ consul_container_name }}"
+    command: /usr/bin/true
+  register: consul_wait
+  until: consul_wait.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  tags:
+    - consul
+    - docker
+    - config
+
+- name: Copy base.hcl to consul config directory
+  ansible.builtin.copy:
+    src: base.hcl
+    dest: "{{ consul_directory }}/base.hcl"
+    owner: root
+    group: root
+    mode: '0644'
+  register: consul_copy_base_hcl
+  notify: Restart Consul container
+  tags:
+    - consul
+    - config
+
+# ---------------------------------------------------------------------------
+# TLS: create certs directory, CA, rename, server cert, copy tls.hcl, restart
+# ---------------------------------------------------------------------------
+
+- name: Create consul config certs directory
+  ansible.builtin.file:
+    path: "{{ consul_directory }}/certs"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - consul
+    - config
+    - tls
+
+- name: Check if consul TLS CA already exists
+  ansible.builtin.stat:
+    path: "{{ consul_directory }}/certs/{{ consul_tls_domain }}-agent-ca.pem"
+  register: consul_tls_ca_file
+  tags:
+    - consul
+    - tls
+
+- name: Run consul tls ca create in certs directory
+  community.docker.docker_container_exec:
+    container: "{{ consul_container_name }}"
+    command: >-
+      sh -c 'mkdir -p /consul/config/certs &&
+      cd /consul/config/certs && consul tls ca create'
+  when: not consul_tls_ca_file.stat.exists
+  tags:
+    - consul
+    - tls
+
+- name: Rename CA files to domain-named files
+  community.docker.docker_container_exec:
+    container: "{{ consul_container_name }}"
+    command: >-
+      sh -c 'cd /consul/config/certs &&
+      mv consul-agent-ca.pem {{ consul_tls_domain }}-agent-ca.pem &&
+      mv consul-agent-ca-key.pem {{ consul_tls_domain }}-agent-ca-key.pem'
+  when: not consul_tls_ca_file.stat.exists
+  tags:
+    - consul
+    - tls
+
+- name: Run consul tls cert create (server) in certs directory
+  community.docker.docker_container_exec:
+    container: "{{ consul_container_name }}"
+    command: >-
+      sh -c 'cd /consul/config/certs &&
+      consul tls cert create -server -dc {{ consul_tls_dc }}
+      -domain {{ consul_tls_domain }}'
+  when: not consul_tls_ca_file.stat.exists
+  register: consul_tls_cert_created
+  notify: Restart Consul container
+  tags:
+    - consul
+    - tls
+
+- name: Set cert ownership for Consul process in container
+  community.docker.docker_container_exec:
+    container: "{{ consul_container_name }}"
+    command: >-
+      chown -R {{ consul_container_user }}:{{ consul_container_group }}
+      /consul/config/certs
+  changed_when: false
+  when: consul_tls_ca_file.stat.exists or (consul_tls_cert_created is defined and consul_tls_cert_created is changed)
+  tags:
+    - consul
+    - tls
+
+- name: Copy tls.hcl to consul config directory
+  ansible.builtin.copy:
+    src: tls.hcl
+    dest: "{{ consul_directory }}/tls.hcl"
+    owner: root
+    group: root
+    mode: '0644'
+  register: consul_copy_tls_hcl
+  notify: Restart Consul container
+  tags:
+    - consul
+    - config
+    - tls
+
+- name: Flush Consul handlers before ACL bootstrap
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - consul
+    - config
+
+# ---------------------------------------------------------------------------
+# ACL bootstrap: run once, save token to config directory
+# ---------------------------------------------------------------------------
+# Secrets are persisted on the host with mode 0600 and never printed.
+
+- name: Wait for consul container to be available before bootstrap
+  community.docker.docker_container_exec:
+    container: "{{ consul_container_name }}"
+    command: /usr/bin/true
+  register: consul_wait_bootstrap
+  until: consul_wait_bootstrap.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  tags:
+    - consul
+    - docker
+    - consul_acl
+
+- name: Check if consul ACL bootstrap result already exists
+  ansible.builtin.stat:
+    path: "{{ consul_bootstrap_token_path }}"
+  register: consul_bootstrap_file
+  tags:
+    - consul
+    - config
+    - consul_acl
+
+- name: Wait for Consul HTTP API before bootstrap
+  community.docker.docker_container_exec:
+    container: "{{ consul_container_name }}"
+    command: >-
+      sh -c 'wget -q -O- http://127.0.0.1:8500/v1/status/leader ||
+      exit 1'
+  register: consul_api_wait
+  until: consul_api_wait.rc == 0
+  retries: 30
+  delay: 2
+  changed_when: false
+  when: not consul_bootstrap_file.stat.exists or (consul_bootstrap_file.stat.size | default(0)) == 0
+  tags:
+    - consul
+    - config
+    - consul_acl
+
+- name: Generate Consul bootstrap secret
+  ansible.builtin.command:
+    cmd: cat /proc/sys/kernel/random/uuid
+  register: consul_bootstrap_secret_generated
+  changed_when: false
+  no_log: true
+  when: not consul_bootstrap_file.stat.exists or (consul_bootstrap_file.stat.size | default(0)) == 0
+  tags:
+    - consul
+    - config
+    - consul_acl
+
+- name: Bootstrap Consul ACL system
+  community.general.consul_acl_bootstrap:
+    url: "{{ consul_api_url }}"
+    bootstrap_secret: "{{ consul_bootstrap_secret_generated.stdout }}"
+    state: present
+  no_log: true
+  when: not consul_bootstrap_file.stat.exists or (consul_bootstrap_file.stat.size | default(0)) == 0
+  tags:
+    - consul
+    - config
+    - consul_acl
+
+- name: Persist Consul bootstrap secret
+  ansible.builtin.copy:
+    content: "SecretID: {{ consul_bootstrap_secret_generated.stdout }}\n"
+    dest: "{{ consul_bootstrap_token_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  when: not consul_bootstrap_file.stat.exists or (consul_bootstrap_file.stat.size | default(0)) == 0
+  tags:
+    - consul
+    - config
+    - consul_acl
+
+# ---------------------------------------------------------------------------
+# ACL policy tekne: copy rules file and create policy (only when bootstrap token exists)
+# ---------------------------------------------------------------------------
+# Stat the bootstrap file here so this block works when run with --tags acl or consul_acl.
+
+- name: Check bootstrap token file for ACL section
+  ansible.builtin.stat:
+    path: "{{ consul_bootstrap_token_path }}"
+  register: consul_acl_bootstrap_file
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Read Consul bootstrap token
+  ansible.builtin.slurp:
+    src: "{{ consul_bootstrap_token_path }}"
+  register: consul_bootstrap_token_file
+  no_log: true
+  when: consul_acl_bootstrap_file.stat.exists
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Parse Consul bootstrap token
+  ansible.builtin.set_fact:
+    consul_management_token: >-
+      {{
+        (
+          consul_bootstrap_token_file.content
+          | b64decode
+          | regex_search('(?m)^SecretID:\\s*(\\S+)', '\\1')
+          | first
+        )
+      }}
+  no_log: true
+  when: consul_acl_bootstrap_file.stat.exists
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Copy acl_tekne.hcl to consul config directory
+  ansible.builtin.copy:
+    src: acl_tekne.hcl
+    dest: "{{ consul_directory }}/acl_tekne.hcl"
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Create Consul ACL policy tekne from acl_tekne.hcl
+  community.general.consul_policy:
+    url: "{{ consul_api_url }}"
+    token: "{{ consul_management_token }}"
+    name: tekne
+    rules: "{{ lookup('ansible.builtin.file', role_path + '/files/acl_tekne.hcl') }}"
+    state: present
+  no_log: true
+  when: consul_acl_bootstrap_file.stat.exists and (consul_acl_bootstrap_file.stat.size | default(0)) > 0
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Create Consul ACL role tekne-admin with policy tekne
+  community.general.consul_role:
+    url: "{{ consul_api_url }}"
+    token: "{{ consul_management_token }}"
+    name: tekne-admin
+    policies:
+      - name: tekne
+    state: present
+  no_log: true
+  when: consul_acl_bootstrap_file.stat.exists and (consul_acl_bootstrap_file.stat.size | default(0)) > 0
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Check for persisted tekne-admin token
+  ansible.builtin.stat:
+    path: "{{ consul_admin_token_path }}"
+  register: consul_admin_token_file
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Generate Consul admin token IDs
+  ansible.builtin.command:
+    cmd: cat /proc/sys/kernel/random/uuid
+  loop:
+    - accessor
+    - secret
+  register: consul_admin_token_ids
+  changed_when: false
+  no_log: true
+  when: not consul_admin_token_file.stat.exists
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Create tekne-admin Consul token
+  community.general.consul_token:
+    url: "{{ consul_api_url }}"
+    token: "{{ consul_management_token }}"
+    accessor_id: "{{ consul_admin_token_ids.results[0].stdout }}"
+    secret_id: "{{ consul_admin_token_ids.results[1].stdout }}"
+    description: Tekne administrator
+    roles:
+      - name: tekne-admin
+    state: present
+  no_log: true
+  when: not consul_admin_token_file.stat.exists
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Persist tekne-admin Consul token
+  ansible.builtin.copy:
+    dest: "{{ consul_admin_token_path }}"
+    content: |
+      accessor_id: {{ consul_admin_token_ids.results[0].stdout }}
+      secret_id: {{ consul_admin_token_ids.results[1].stdout }}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  when: not consul_admin_token_file.stat.exists
+  tags:
+    - consul
+    - config
+    - acl
+
+- name: Create Consul KV key tekne/
+  community.general.consul_kv:
+    host: "{{ consul_docker_ip }}"
+    token: "{{ consul_management_token }}"
+    key: tekne/aws/us-west-2/network
+    value: ""
+    state: present
+  no_log: true
+  when: >-
+    consul_acl_bootstrap_file.stat.exists | default(false)
+    and (consul_acl_bootstrap_file.stat.size | default(0)) > 0
+  tags:
+    - consul
+    - config
+    - acl

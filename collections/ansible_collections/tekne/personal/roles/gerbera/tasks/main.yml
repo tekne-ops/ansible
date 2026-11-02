@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for ansible-role-gerbera
+
+- name: Create /srv/media directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ gerbera_config_dir }}"
+    - "{{ gerbera_media_dir }}"
+  tags:
+    - gerbera
+    - config
+
+- name: Create and start Gerbera container
+  community.docker.docker_container:
+    name: "{{ gerbera_container_name }}"
+    image: "{{ gerbera_container_image }}"
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    env:
+      G_LOG: info
+    volumes:
+      - "{{ gerbera_media_dir }}:/mnt/content:ro"
+    comparisons:
+      image: strict
+      volumes: strict
+  tags:
+    - gerbera
+    - docker

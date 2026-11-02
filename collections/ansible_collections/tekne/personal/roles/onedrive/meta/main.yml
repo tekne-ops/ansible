@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: abraunegg OneDrive client, config, and sync directory
+  namespace: tekne
+  role_name: onedrive
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - onedrive
+collections:
+  - ansible.posix
+  - community.general
+dependencies: []

@@ -1,0 +1,603 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for ./ansible-role-xfce4/
+
+# =============================================================================
+# Network Connectivity Check
+# =============================================================================
+
+- name: Wait for network connectivity before package installation
+  ansible.builtin.command:
+    cmd: ping -c 1 -W 2 archlinux.org
+  register: xfce4_network_check
+  until: xfce4_network_check.rc == 0
+  retries: 30
+  delay: 2
+  changed_when: false
+  when: not xfce4_install_chroot_phase | bool
+  tags:
+    - xfce4
+    - network
+    - packages
+
+# =============================================================================
+# Package Installation - All Hosts
+# =============================================================================
+
+- name: Install XFCE4 package groups
+  community.general.pacman:
+    name: "{{ xfce4_groups }}"
+    state: present
+    extra_args: '--noconfirm --needed'
+  register: xfce4_groups_install_result
+  tags:
+    - xfce4
+    - packages
+
+- name: Install XFCE4 packages
+  community.general.pacman:
+    name: "{{ xfce4_packages }}"
+    state: present
+    extra_args: '--noconfirm --needed'
+  register: xfce4_install_result
+  tags:
+    - xfce4
+    - packages
+
+# bluez is in xfce4_packages. The network role only enables bluetooth.service
+# for laptops, so a desktop that installs the same packages would lose the
+# service at reboot.
+- name: Enable Bluetooth
+  ansible.builtin.systemd:
+    name: bluetooth.service
+    enabled: true
+    state: "{{ 'started' if not (xfce4_install_chroot_phase | bool) else omit }}"
+  tags:
+    - xfce4
+    - packages
+
+# =============================================================================
+# LightDM Installation - ASTER Only
+# =============================================================================
+
+- name: Install LightDM packages (ASTER only)
+  community.general.pacman:
+    name: "{{ xfce4_lightdm_packages }}"
+    state: present
+    extra_args: '--noconfirm --needed'
+  register: xfce4_lightdm_install_result
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - packages
+
+- name: Remove light-locker (causes post-login black screen)
+  community.general.pacman:
+    name: light-locker
+    state: absent
+    extra_args: '--noconfirm'
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - packages
+
+- name: Remove unused LightDM greeters
+  community.general.pacman:
+    name: "{{ xfce4_lightdm_unused_packages }}"
+    state: absent
+    extra_args: '--noconfirm'
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - packages
+
+- name: Remove the COSMIC desktop portal
+  community.general.pacman:
+    name: xdg-desktop-portal-cosmic
+    state: absent
+    extra_args: '--noconfirm'
+  tags:
+    - xfce4
+    - packages
+    - portals
+
+- name: Ensure the LightDM drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/lightdm/lightdm.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - config
+
+- name: Deploy the LightDM XFCE drop-in
+  ansible.builtin.copy:
+    src: 50-xfce.conf
+    dest: /etc/lightdm/lightdm.conf.d/50-xfce.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - config
+
+- name: Remove settings managed by the LightDM drop-in from the main file
+  ansible.builtin.lineinfile:
+    path: /etc/lightdm/lightdm.conf
+    regexp: "^{{ item }}="
+    state: absent
+  loop:
+    - greeter-session
+    - user-session
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - config
+
+- name: Enable LightDM service without changing its runtime state (ASTER only)
+  ansible.builtin.systemd:
+    name: "{{ xfce4_lightdm_service }}"
+    enabled: true
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - service
+
+# =============================================================================
+# XFCE backgrounds and slick-greeter (LightDM host only)
+# =============================================================================
+
+- name: Clone tekne-ops/backgrounds repository
+  ansible.builtin.git:
+    repo: "{{ xfce4_backgrounds_repo }}"
+    dest: /tmp/ansible_xfce4_backgrounds_clone
+    version: "{{ xfce4_backgrounds_version }}"
+    force: true
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - backgrounds
+
+- name: Ensure the backgrounds directory exists
+  ansible.builtin.file:
+    path: "{{ xfce4_backgrounds_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - backgrounds
+
+- name: Install background repository contents
+  ansible.builtin.command:
+    argv:
+      - rsync
+      - -a
+      - -i
+      - --delete
+      - --exclude
+      - .git
+      - /tmp/ansible_xfce4_backgrounds_clone/
+      - "{{ xfce4_backgrounds_dir }}/"
+  register: xfce4_backgrounds_sync
+  changed_when: xfce4_backgrounds_sync.stdout | length > 0
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - backgrounds
+
+- name: Remove temporary backgrounds clone
+  ansible.builtin.file:
+    path: /tmp/ansible_xfce4_backgrounds_clone
+    state: absent
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - backgrounds
+
+- name: Copy slick-greeter.conf to LightDM config
+  ansible.builtin.copy:
+    src: "{{ xfce4_backgrounds_dir }}/slick-greeter.conf"
+    dest: /etc/lightdm/slick-greeter.conf
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - slick-greeter
+
+- name: Set background in slick-greeter.conf
+  ansible.builtin.replace:
+    path: /etc/lightdm/slick-greeter.conf
+    regexp: '^background=.*'
+    replace: "background={{ xfce4_slick_greeter_background }}"
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - slick-greeter
+
+# =============================================================================
+# User Configuration
+# =============================================================================
+
+- name: Get user info for home directories
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item.name }}"
+  loop: "{{ xfce4_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: xfce4_user_info
+  tags:
+    - xfce4
+    - config
+
+- name: Create xdg-desktop-portal config directory for each user
+  ansible.builtin.file:
+    path: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.config/xdg-desktop-portal"
+    state: directory
+    owner: "{{ item.item.name }}"
+    group: "{{ item.item.group | default(xfce4_default_group) }}"
+    mode: '0755'
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - xfce4
+    - config
+
+- name: Create themes directory for each user
+  ansible.builtin.file:
+    path: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.themes"
+    state: directory
+    owner: "{{ item.item.name }}"
+    group: "{{ item.item.group | default(xfce4_default_group) }}"
+    mode: '0755'
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - xfce4
+    - config
+    - themes
+
+- name: Extract minimal-grey2 theme for each user
+  ansible.builtin.unarchive:
+    src: 98942-minimal-grey2.tar
+    dest: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.themes"
+    owner: "{{ item.item.name }}"
+    group: "{{ item.item.group | default(xfce4_default_group) }}"
+    creates: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.themes/minimal-grey2"
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - xfce4
+    - config
+    - themes
+
+- name: Ensure each user has an xfconf channel directory
+  ansible.builtin.file:
+    path: "{{ item.0.ansible_facts.getent_passwd[item.0.item.name][4] }}/{{ item.1 }}"
+    state: directory
+    owner: "{{ item.0.item.name }}"
+    group: "{{ item.0.item.group | default(xfce4_default_group) }}"
+    mode: '0755'
+  loop: "{{ xfce4_user_info.results | product(['.config/xfce4', '.config/xfce4/xfconf', '.config/xfce4/xfconf/xfce-perchannel-xml']) | list }}"
+  loop_control:
+    label: "{{ item.0.item.name }}/{{ item.1 }}"
+  tags:
+    - xfce4
+    - config
+
+- name: Enable xfwm4 vertical sync for each user
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/set_xfwm4_vsync.py"
+      - "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: xfce4_vsync_xml
+  changed_when: "'changed' in xfce4_vsync_xml.stdout"
+  tags:
+    - xfce4
+    - config
+
+- name: Give the xfwm4 channel file to its user
+  ansible.builtin.file:
+    path: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
+    owner: "{{ item.item.name }}"
+    group: "{{ item.item.group | default(xfce4_default_group) }}"
+    mode: '0644'
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - xfce4
+    - config
+
+- name: Set XFCE session, sound, and display defaults before first login
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/set_xfce_defaults.py"
+      - "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.config/xfce4/xfconf/xfce-perchannel-xml"
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: xfce4_default_xml
+  changed_when: "'changed' in xfce4_default_xml.stdout"
+  tags:
+    - xfce4
+    - config
+
+- name: Give the managed XFCE channel files to their users
+  ansible.builtin.file:
+    path: "{{ item.0.ansible_facts.getent_passwd[item.0.item.name][4] }}/.config/xfce4/xfconf/xfce-perchannel-xml/{{ item.1 }}.xml"
+    owner: "{{ item.0.item.name }}"
+    group: "{{ item.0.item.group | default(xfce4_default_group) }}"
+    mode: '0644'
+  loop: "{{ xfce4_user_info.results | product(['xfce4-session', 'xsettings', 'displays']) | list }}"
+  loop_control:
+    label: "{{ item.0.item.name }}/{{ item.1 }}"
+  tags:
+    - xfce4
+    - config
+
+- name: Remove saved XFCE sessions
+  ansible.builtin.file:
+    path: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.cache/sessions"
+    state: absent
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - xfce4
+    - config
+
+- name: Copy xfce-portals.conf for each user
+  ansible.builtin.copy:
+    src: xfce-portals.conf
+    dest: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.config/xdg-desktop-portal/xfce-portals.conf"
+    owner: "{{ item.item.name }}"
+    group: "{{ item.item.group | default(xfce4_default_group) }}"
+    mode: '0644'
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - xfce4
+    - config
+    - portals
+
+- name: Remove unused picom configuration
+  ansible.builtin.file:
+    path: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}/.config/picom"
+    state: absent
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - xfce4
+    - config
+
+- name: Record the ACPI media-key user runtime directory
+  ansible.builtin.set_fact:
+    xfce4_acpi_runtime_dir: "/run/user/{{ item.ansible_facts.getent_passwd[item.item.name][1] }}"
+  loop: "{{ xfce4_user_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - xfce4_hostname in xfce4_acpi_hosts
+    - item.item.name == xfce4_acpi_user
+  tags:
+    - xfce4
+    - config
+    - acpi
+
+# =============================================================================
+# System Configuration
+# =============================================================================
+
+- name: Check whether the old role overwrote the GNOME Keyring portal definition
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/grep
+      - -F
+      - UseIn=XFCE;Cinnamon;generic
+      - /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal
+  register: xfce4_custom_keyring_portal
+  changed_when: false
+  failed_when: xfce4_custom_keyring_portal.rc not in [0, 1]
+  tags:
+    - xfce4
+    - config
+    - portals
+
+- name: Restore the package-owned GNOME Keyring portal definition
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/pacman
+      - -S
+      - --noconfirm
+      - gnome-keyring
+  when: xfce4_custom_keyring_portal.rc == 0
+  changed_when: true
+  tags:
+    - xfce4
+    - config
+    - portals
+
+- name: Ensure the ACPI handler directory exists
+  ansible.builtin.file:
+    path: /etc/acpi
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: xfce4_hostname in xfce4_acpi_hosts
+  tags:
+    - xfce4
+    - config
+    - acpi
+
+- name: Install the ACPI media-key handler
+  ansible.builtin.template:
+    src: handler.sh.j2
+    dest: /etc/acpi/handler.sh
+    owner: root
+    group: root
+    mode: '0755'
+  when: xfce4_hostname in xfce4_acpi_hosts
+  tags:
+    - xfce4
+    - config
+    - acpi
+
+# =============================================================================
+# Verification - All Hosts
+# =============================================================================
+
+- name: Verify XFCE4 package groups are installed
+  ansible.builtin.command:
+    cmd: "pacman -Qg {{ item }}"
+  loop: "{{ xfce4_groups }}"
+  register: xfce4_group_verify
+  changed_when: false
+  failed_when: xfce4_group_verify.rc != 0
+  tags:
+    - xfce4
+    - verify
+
+- name: Verify XFCE4 packages are installed
+  ansible.builtin.command:
+    cmd: "pacman -Q {{ item }}"
+  loop: "{{ xfce4_packages }}"
+  register: xfce4_package_verify
+  changed_when: false
+  failed_when: xfce4_package_verify.rc != 0
+  tags:
+    - xfce4
+    - verify
+
+- name: Display XFCE4 installation result
+  ansible.builtin.debug:
+    msg: >-
+      XFCE4 groups installed: {{ xfce4_groups_install_result is success }},
+      XFCE4 packages installed: {{ xfce4_install_result is success }}
+  tags:
+    - xfce4
+    - verify
+
+# =============================================================================
+# Verification - ASTER Only
+# =============================================================================
+
+- name: Verify LightDM packages are installed (ASTER only)
+  ansible.builtin.command:
+    cmd: "pacman -Q {{ item }}"
+  loop: "{{ xfce4_lightdm_packages }}"
+  register: xfce4_lightdm_package_verify
+  changed_when: false
+  failed_when: xfce4_lightdm_package_verify.rc != 0
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - verify
+
+- name: Inspect LightDM service state (ASTER only)
+  ansible.builtin.systemd:
+    name: "{{ xfce4_lightdm_service }}"
+  register: xfce4_lightdm_service_status
+  when:
+    - xfce4_hostname in xfce4_lightdm_hosts
+    - not xfce4_install_chroot_phase | bool
+  tags:
+    - xfce4
+    - lightdm
+    - verify
+
+- name: Check LightDM enablement without systemd (chroot)  # noqa command-instead-of-module
+  ansible.builtin.command:
+    cmd: systemctl is-enabled {{ xfce4_lightdm_service }}
+  register: xfce4_lightdm_enabled
+  changed_when: false
+  when:
+    - xfce4_hostname in xfce4_lightdm_hosts
+    - xfce4_install_chroot_phase | bool
+  tags:
+    - xfce4
+    - lightdm
+    - verify
+
+- name: Verify LightDM is enabled (ASTER only)
+  ansible.builtin.assert:
+    that:
+      - xfce4_lightdm_service_status.status.UnitFileState == 'enabled'
+    fail_msg: "{{ xfce4_lightdm_service }} is not enabled"
+  when:
+    - xfce4_hostname in xfce4_lightdm_hosts
+    - not xfce4_install_chroot_phase | bool
+  tags:
+    - xfce4
+    - lightdm
+    - verify
+
+- name: Verify LightDM is enabled during chroot (ASTER only)
+  ansible.builtin.assert:
+    that:
+      - xfce4_lightdm_enabled.stdout == 'enabled'
+    fail_msg: "{{ xfce4_lightdm_service }} is not enabled"
+  when:
+    - xfce4_hostname in xfce4_lightdm_hosts
+    - xfce4_install_chroot_phase | bool
+  tags:
+    - xfce4
+    - lightdm
+    - verify
+
+- name: Display LightDM verification results (ASTER only)
+  ansible.builtin.debug:
+    msg: |
+      LightDM Status on {{ xfce4_hostname }}:
+      ==================================
+      Packages installed: {{ xfce4_lightdm_install_result is success }}
+      Service enabled: {{
+        xfce4_lightdm_enabled.stdout
+        if not (xfce4_lightdm_enabled.skipped | default(false))
+        else xfce4_lightdm_service_status.status.UnitFileState
+      }}
+      Service state: {{
+        'not queried during chroot'
+        if xfce4_install_chroot_phase | bool
+        else xfce4_lightdm_service_status.status.ActiveState
+      }}
+  when: xfce4_hostname in xfce4_lightdm_hosts
+  tags:
+    - xfce4
+    - lightdm
+    - verify

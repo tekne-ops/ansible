@@ -1,0 +1,245 @@
+---
+# ============================================
+# XFCE SESSION DETECTION
+# ============================================
+
+- name: Get bootstrap user UID for XFCE session check
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ bootstrap_user }}"
+  register: bootstrap_user_getent
+  tags: [bootstrap, xfce]
+
+- name: Check for active user session (DBus)
+  ansible.builtin.stat:
+    path: "/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}/bus"
+  register: bootstrap_xfce_session_bus
+  tags: [bootstrap, xfce]
+
+- name: Set whether XFCE bootstrap configuration should run
+  ansible.builtin.set_fact:
+    bootstrap_xfce_apply: >-
+      {{ not (bootstrap_xfce_skip_if_no_display | bool)
+      or (bootstrap_xfce_session_bus.stat.exists | default(false)) }}
+  tags: [bootstrap, xfce]
+
+- name: Skip XFCE bootstrap configuration (no active display session)
+  ansible.builtin.debug:
+    msg: >-
+      Skipping XFCE bootstrap configuration: no active session for
+      {{ bootstrap_user }} (log in to the desktop and re-run with --tags bootstrap).
+  when: not bootstrap_xfce_apply | bool
+  tags: [bootstrap, xfce]
+
+# ============================================
+# WALLPAPER CONFIGURATION
+# ============================================
+
+- name: Define desired XFCE settings
+  ansible.builtin.set_fact:
+    bootstrap_xfce_settings:
+      - channel: xsettings
+        property: /Gtk/CursorThemeName
+        type: string
+        value: "{{ bootstrap_xfce_cursor_theme }}"
+      - channel: xfwm4
+        property: /general/theme
+        type: string
+        value: "{{ bootstrap_xfce_wm_theme }}"
+      - channel: xfwm4
+        property: /general/use_compositing
+        type: bool
+        value: 'true'
+      - channel: xfwm4
+        property: /general/vblank_mode
+        type: string
+        value: glx
+      - channel: xfwm4
+        property: /general/unredirect_overlays
+        type: bool
+        value: 'true'
+      - channel: xfce4-session
+        property: /general/SaveOnExit
+        type: bool
+        value: 'false'
+      - channel: displays
+        property: /Notify
+        type: int
+        value: '3'
+      - channel: displays
+        property: /AutoEnableProfiles
+        type: int
+        value: '3'
+      - channel: xsettings
+        property: /Net/IconThemeName
+        type: string
+        value: "{{ bootstrap_xfce_icon_theme }}"
+      - channel: xsettings
+        property: /Net/ThemeName
+        type: string
+        value: "{{ bootstrap_xfce_gtk_theme }}"
+      - channel: xfce4-keyboard-shortcuts
+        property: /commands/custom/<Super>t
+        type: string
+        value: exo-open --launch TerminalEmulator
+      - channel: xfce4-keyboard-shortcuts
+        property: /commands/custom/<Super>b
+        type: string
+        value: exo-open --launch WebBrowser
+      - channel: xfwm4
+        property: /general/workspace_count
+        type: int
+        value: "{{ bootstrap_xfce_workspace_count | string }}"
+      - channel: xsettings
+        property: /Net/EnableInputFeedbackSounds
+        type: bool
+        value: 'true'
+      - channel: xsettings
+        property: /Net/EnableEventSounds
+        type: bool
+        value: 'true'
+      - channel: xsettings
+        property: /Net/SoundThemeName
+        type: string
+        value: Smooth
+      - channel: xsettings
+        property: /Xft/RGBA
+        type: string
+        value: "{{ bootstrap_xfce_font_rgba }}"
+      - channel: xsettings
+        property: /Gtk/MonospaceFontName
+        type: string
+        value: "{{ bootstrap_xfce_monospace_font }}"
+      - channel: xsettings
+        property: /Gtk/FontName
+        type: string
+        value: "{{ bootstrap_xfce_font }}"
+  when: bootstrap_xfce_apply | bool
+  tags: [bootstrap, xfce]
+
+- name: Read current XFCE settings
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.command:
+    argv:
+      - xfconf-query
+      - --channel
+      - "{{ item.channel }}"
+      - --property
+      - "{{ item.property }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}"
+    DISPLAY: ':0'
+    DBUS_SESSION_BUS_ADDRESS: >-
+      unix:path=/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}/bus
+  loop: "{{ bootstrap_xfce_settings | default([]) }}"
+  loop_control:
+    label: "{{ item.channel }}:{{ item.property }}"
+  register: bootstrap_xfce_current_settings
+  changed_when: false
+  failed_when: bootstrap_xfce_current_settings.rc not in [0, 1]
+  check_mode: false
+  when: bootstrap_xfce_apply | bool
+  tags: [bootstrap, xfce]
+
+- name: Apply changed XFCE settings
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.command:
+    argv:
+      - xfconf-query
+      - --channel
+      - "{{ item.item.channel }}"
+      - --property
+      - "{{ item.item.property }}"
+      - --create
+      - --type
+      - "{{ item.item.type }}"
+      - --set
+      - "{{ item.item.value }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}"
+    DISPLAY: ':0'
+    DBUS_SESSION_BUS_ADDRESS: >-
+      unix:path=/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}/bus
+  loop: "{{ bootstrap_xfce_current_settings.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.channel }}:{{ item.item.property }}"
+  when:
+    - bootstrap_xfce_apply | bool
+    - ansible_check_mode or item.rc != 0 or item.stdout != item.item.value
+  changed_when: true
+  tags: [bootstrap, xfce]
+
+- name: Read current XFCE wallpaper settings
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.command:
+    argv:
+      - xfconf-query
+      - --channel
+      - xfce4-desktop
+      - --property
+      - "/backdrop/screen0/monitor{{ item }}/workspace0/last-image"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}"
+    DISPLAY: ':0'
+    DBUS_SESSION_BUS_ADDRESS: >-
+      unix:path=/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}/bus
+  loop: "{{ bootstrap_xfce_monitors }}"
+  register: bootstrap_xfce_current_wallpapers
+  changed_when: false
+  failed_when: bootstrap_xfce_current_wallpapers.rc not in [0, 1]
+  check_mode: false
+  when: bootstrap_xfce_apply | bool
+  tags: [bootstrap, xfce, wallpaper]
+
+- name: Apply changed XFCE wallpaper settings
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.command:
+    argv:
+      - xfconf-query
+      - --channel
+      - xfce4-desktop
+      - --property
+      - "/backdrop/screen0/monitor{{ item.item }}/workspace0/last-image"
+      - --create
+      - --type
+      - string
+      - --set
+      - "{{ bootstrap_xfce_wallpaper }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}"
+    DISPLAY: ':0'
+    DBUS_SESSION_BUS_ADDRESS: >-
+      unix:path=/run/user/{{ bootstrap_user_getent.ansible_facts.getent_passwd[bootstrap_user][1] }}/bus
+  loop: "{{ bootstrap_xfce_current_wallpapers.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - bootstrap_xfce_apply | bool
+    - ansible_check_mode or item.rc != 0 or item.stdout != bootstrap_xfce_wallpaper
+  changed_when: true
+  tags: [bootstrap, xfce, wallpaper]
+
+# ============================================
+# SUMMARY
+# ============================================
+
+- name: Display XFCE configuration summary
+  ansible.builtin.debug:
+    msg:
+      - >-
+        XFCE configuration {{ 'applied' if bootstrap_xfce_apply | bool
+        else 'SKIPPED (no display)' }}:
+      - "  User: {{ bootstrap_user }}"
+      - "  Monitors: {{ bootstrap_xfce_monitors | join(', ') }}"
+      - "  Cursor theme: {{ bootstrap_xfce_cursor_theme }}"
+      - "  WM theme: {{ bootstrap_xfce_wm_theme }}"
+      - "  GTK theme: {{ bootstrap_xfce_gtk_theme }}"
+      - "  Icon theme: {{ bootstrap_xfce_icon_theme }}"
+      - "  Font: {{ bootstrap_xfce_font }}"
+      - "  Monospace font: {{ bootstrap_xfce_monospace_font }}"
+      - "  Workspaces: {{ bootstrap_xfce_workspace_count }}"
+  tags: [bootstrap, xfce]

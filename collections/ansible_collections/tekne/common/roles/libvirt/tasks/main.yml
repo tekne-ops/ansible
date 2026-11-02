@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: MIT-0
+---
+# tasks file for ansible-role-libvirt
+
+- name: Install libvirt and related packages
+  community.general.pacman:
+    name:
+      - libvirt
+      - dnsmasq
+      - dmidecode
+      - qemu-full
+      - qemu-block-gluster
+      - qemu-block-iscsi
+      - samba
+      - edk2-ovmf-fedora
+    state: present
+  register: libvirt_packages_install
+
+- name: Confirm libvirt packages are installed
+  ansible.builtin.command: >-
+    pacman -Q libvirt dnsmasq dmidecode qemu-full
+    qemu-block-gluster qemu-block-iscsi samba
+  register: libvirt_packages_check
+  changed_when: false
+  failed_when: libvirt_packages_check.rc != 0
+
+- name: Gather local user accounts
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Initialize regular local user list
+  ansible.builtin.set_fact:
+    libvirt_local_users: []
+
+- name: Select regular local users
+  ansible.builtin.set_fact:
+    libvirt_local_users: "{{ libvirt_local_users + [item.key] }}"
+  loop: "{{ ansible_facts.getent_passwd | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value[1] | int >= 1000
+    - item.value[1] | int < 65534
+
+- name: Add all local users to libvirt and kvm groups
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: libvirt,kvm
+    append: true
+  loop: "{{ libvirt_local_users | default([]) }}"
+
+- name: Enable libvirtd.service without changing its runtime state
+  ansible.builtin.systemd:
+    name: libvirtd
+    enabled: true
+  when: libvirt_packages_check.rc == 0

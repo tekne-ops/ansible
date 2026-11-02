@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: MIT-0
+---
+# defaults file for ./ansible-role-gaming
+
+# Gaming packages to install
+gaming_packages:
+  - lutris
+  - steam
+  - lib32-systemd
+  - wine-tkg-valve-exp-bleeding
+  - winetricks
+  - wine-gecko
+  - wine-mono
+  - openbox
+  - gamemode
+  - lib32-gamemode
+  - proton-ge-custom-bin
+  - noto-fonts-cjk
+  # - lib32-pcsclite
+
+# Hostnames that receive gaming packages, limits, schedtoold, gamemode.
+# Membership comes from inventories/host_profiles.
+gaming_hosts: []
+
+# NVIDIA Xorg drop-in. Membership comes from inventories/host_profiles.
+gaming_xorg_hosts: []
+
+# Dedicated game-library mount. Membership comes from inventories/host_profiles.
+gaming_library_path: /mnt/games
+gaming_library_hosts: []
+
+# File destinations
+gaming_xorg_conf_dest: /etc/X11/xorg.conf.d/20-yugen-nvidia.conf
+gaming_limits_conf_dest: /etc/security/limits.d/gaming.conf
+gaming_script_dest: /usr/local/bin/game
+gaming_schedtoold_conf_dest: /etc/schedtoold.conf
+gaming_gamemode_ini_dest: /etc/gamemode.ini
+gaming_gamemode_users:
+  - dvaliente
+  - devops

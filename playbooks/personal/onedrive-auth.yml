@@ -1,0 +1,39 @@
+---
+# One-time Microsoft device login. Normal workstation convergence does not pause.
+#
+#   ansible-playbook playbooks/personal/onedrive-auth.yml -i inventories/personal/hosts.yml --ask-vault-pass
+
+- name: Authenticate OneDrive
+  hosts: workstations
+  connection: local
+  become: true
+
+  vars:
+    tekne_allowed_hostnames:
+      - ASTER
+      - YUGEN
+      - KVM
+    bootstrap_onedrive_interactive: true
+
+  pre_tasks:
+    - name: Assert the personal inventory context
+      ansible.builtin.assert:
+        that:
+          - tekne_context == "personal"
+        fail_msg: playbooks/personal/onedrive-auth.yml requires inventories/personal (tekne_context=personal).
+      tags: [always]
+
+    - name: Assert the workstation host profile
+      ansible.builtin.import_tasks: tasks/hostname.yml
+
+  tasks:
+    - name: Install OneDrive
+      ansible.builtin.import_role:
+        name: tekne.personal.onedrive
+      tags: [onedrive]
+
+    - name: Run the interactive OneDrive first sync
+      ansible.builtin.import_role:
+        name: tekne.personal.bootstrap
+        tasks_from: onedrive_sync.yml
+      tags: [onedrive, bootstrap]

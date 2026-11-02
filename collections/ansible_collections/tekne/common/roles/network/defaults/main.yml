@@ -1,0 +1,67 @@
+---
+# Hostname (from playbook pre_tasks / hostname role)
+network_hostname: "{{ hostname | default(ansible_facts['hostname']) | upper }}"
+network_hostname_raw: "{{ cached_hostname_raw | default(ansible_facts['hostname']) }}"
+
+# Host membership is set by inventories/host_profiles. Empty means the feature
+# stays off, so this role can run on a machine that is not one of the Tekne hosts.
+network_manage_bridge: false
+network_manage_laptop: false
+network_wifi_hosts: []
+network_ethernet_hosts: []
+network_config_hosts: "{{ (network_wifi_hosts + network_ethernet_hosts) | unique }}"
+
+# WiFi (ASTER only); set passphrase in vault
+network_wifi_ssid: "{{ os_wifi_ssid | default('esher') }}"
+network_wifi_interface: "{{ os_wifi_interface | default('') }}"
+network_wifi_passphrase: "{{ os_wifi_passphrase | default('') }}"
+network_wifi_driver_module: mt7925e
+network_wifi_detect_retries: 30
+network_wifi_detect_delay: 2
+
+# Live WiFi association via iwctl (disable during arch-chroot install; config still deploys)
+network_connect_wifi: true
+
+# Packages that provide the ASTER services managed by this role. Keep these
+# here instead of relying on a later desktop role to provide their unit files.
+network_laptop_service_packages:
+  - bluez
+  - iwd
+  - thermald
+  - tlp
+  - bolt
+
+# Skip the live IPv4/DNS check during arch-chroot install (live ISO already verified network)
+network_install_chroot_phase: "{{ install_chroot_phase | default(false) }}"
+
+# DNS (single drop-in: /etc/systemd/resolved.conf.d/95-dns.conf)
+network_resolved_manage: true
+# Every host pins Quad9 then Google. DHCP and IPv6 RA nameservers are ignored:
+# strict DoT cannot authenticate a resolver that arrives as a bare IP.
+# Cablecolor/Tigo drop much of port 53; Tigo blocks 1.1.1.1:853.
+network_dns_from_dhcp: false
+network_dns_servers:
+  - 1.1.1.3
+  - 94.140.14.14
+  - 94.140.15.15
+# Empty list writes FallbackDNS= and clears systemd's compiled-in 1.1.1.1/8.8.8.8 list.
+network_dns_fallback: []
+network_dns_search_domains:
+  - tekne.sv
+# "~." keeps global resolvers as the default DNS route. A more-specific
+# per-link domain (for example a VPN split-DNS suffix) still wins.
+network_dns_route_domains:
+  - "~."
+network_dns_over_tls: 'yes'
+network_dnssec: 'no'
+network_dns_cache: 'yes'
+network_dns_llmnr: 'no'
+# Serve unexpired cache entries through a short upstream DoT outage.
+network_dns_stale_retention_sec: '30min'
+network_dhcp_use_dns: "{{ 'yes' if network_dns_from_dhcp | bool else 'no' }}"
+network_dhcp_use_domains: 'no'
+network_dns_default_route: "{{ 'yes' if network_dns_from_dhcp | bool else 'no' }}"
+
+# SLAAC on the managed link, DHCPv4 for IPv4. Bridge member ports stay IPv6-off.
+network_ipv6_accept_ra: true
+network_ipv6_privacy_extensions: 'yes'

@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: KDE Plasma desktop and plasma login manager
+  namespace: tekne
+  role_name: kde
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - desktop
+    - kde
+collections:
+  - community.general
+dependencies: []

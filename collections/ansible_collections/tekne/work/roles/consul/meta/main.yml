@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  author: dvaliente
+  description: HashiCorp Consul server container, ACL bootstrap, and service registration
+  namespace: tekne
+  role_name: consul
+  license: MIT
+  min_ansible_version: 2.19.0
+  standalone: false
+  platforms:
+    - name: ArchLinux
+      versions:
+        - all
+  galaxy_tags:
+    - archlinux
+    - consul
+    - docker
+collections:
+  - community.docker
+  - community.general
+dependencies: []
