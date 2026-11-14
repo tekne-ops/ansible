@@ -42,6 +42,7 @@ argument_specs:
           - opencl-nvidia-tkg
           - vulkan-icd-loader
           - nvidia-utils-tkg
+          - libva-nvidia-driver
       gpu_hybrid_extra_packages:
         description: The hybrid extra packages value for the gpu role.
         required: false

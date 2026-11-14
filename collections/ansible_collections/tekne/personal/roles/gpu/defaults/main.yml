@@ -20,6 +20,7 @@ gpu_nvidia_packages:
   - opencl-nvidia-tkg
   - vulkan-icd-loader
   - nvidia-utils-tkg
+  - libva-nvidia-driver
 
 # Extra packages for hybrid PRIME offload (ASTER)
 gpu_hybrid_extra_packages:

@@ -90,6 +90,21 @@
     - home_config
     - ssh
 
+# The installer creates /home/<user> before this role when a later partition
+# mounts inside it. useradd leaves that existing directory owned by root.
+- name: Give each user ownership of their home directory
+  ansible.builtin.file:
+    path: "{{ item.ansible_facts.getent_passwd[item.item.name][4] }}"
+    state: directory
+    owner: "{{ item.item.name }}"
+    group: "{{ item.item.group | default(user_default_group) }}"
+  loop: "{{ user_account_info.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - user
+    - home_config
+
 - name: Create user directories
   ansible.builtin.file:
     path: "{{ item.0.ansible_facts.getent_passwd[item.0.item.name][4] }}/{{ item.1 }}"

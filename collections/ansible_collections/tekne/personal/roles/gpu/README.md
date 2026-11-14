@@ -32,7 +32,9 @@ ansible-galaxy collection install community.general
 
 - lib32-opencl-nvidia-tkg, lib32-vulkan-icd-loader, lib32-nvidia-utils-tkg
 - nvidia-open-dkms-tkg, nvidia-settings-tkg, opencl-nvidia-tkg
-- vulkan-icd-loader, nvidia-utils-tkg
+- vulkan-icd-loader, nvidia-utils-tkg, libva-nvidia-driver
+
+Discrete NVIDIA hosts also get `/etc/modprobe.d/nvidia.conf` (`NVreg_UsePageAttributeTable=1`, and `NVreg_PreserveVideoMemoryAllocations=1` when the suspend units exist), `nvidia-persistenced`, and the NVIDIA suspend units.
 
 ### Intel/Mesa Packages (THEMIS, KVM, HEPHAESTUS, and ASTER)
 

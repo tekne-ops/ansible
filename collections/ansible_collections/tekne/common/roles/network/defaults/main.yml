@@ -3,7 +3,7 @@
 network_hostname: "{{ hostname | default(ansible_facts['hostname']) | upper }}"
 network_hostname_raw: "{{ cached_hostname_raw | default(ansible_facts['hostname']) }}"
 
-# Host membership is set by inventories/host_profiles. Empty means the feature
+# Host membership is set by inventories/personal/host_vars. Empty means the feature
 # stays off, so this role can run on a machine that is not one of the Tekne hosts.
 network_manage_bridge: false
 network_manage_laptop: false
@@ -36,7 +36,8 @@ network_install_chroot_phase: "{{ install_chroot_phase | default(false) }}"
 
 # DNS (single drop-in: /etc/systemd/resolved.conf.d/95-dns.conf)
 network_resolved_manage: true
-# Every host pins Quad9 then Google. DHCP and IPv6 RA nameservers are ignored:
+# Every host pins Cloudflare for Families (1.1.1.3), then AdGuard
+# (94.140.14.14, 94.140.15.15). DHCP and IPv6 RA nameservers are ignored:
 # strict DoT cannot authenticate a resolver that arrives as a bare IP.
 # Cablecolor/Tigo drop much of port 53; Tigo blocks 1.1.1.1:853.
 network_dns_from_dhcp: false

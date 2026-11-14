@@ -488,8 +488,10 @@ configure_uki_boot() {
 ${params_line}
 EOF
 
+    # The UKI embeds the initramfs. mkinitcpio's microcode hook puts the
+    # installed ucode image inside it, so the command line does not list initrd=.
     cat >"$mnt/etc/cmdline.d/root.conf" <<EOF
-root=LABEL=ROOT rw initrd=\\intel-ucode.img initrd=\\initramfs-${kernel_pkg}.img
+root=LABEL=ROOT rw
 EOF
 
     cat >"$mnt/etc/mkinitcpio.d/${kernel_pkg}.preset" <<EOF
@@ -981,6 +983,29 @@ wait_for_ntp_sync() {
     die "NTP did not synchronize within 30 seconds; package signatures cannot be validated safely"
 }
 
+# Profile diskN_lbaf selects an LBA format index. Refuse it unless that
+# format is 4096-byte sectors. nvme-cli's human output is the live-ISO
+# interface; jq is not installed yet.
+assert_nvme_lbaf_4k() {
+    local ctrl="$1" lbaf="$2" ns line size
+    ns="$(nvme_ns "$ctrl")"
+    if ((DRY_RUN)); then
+        log DRY-RUN "require ${ns} LBA format ${lbaf} to be 4096-byte sectors"
+        return 0
+    fi
+    line="$(nvme id-ns -H "$ns" | awk -v idx="$lbaf" '
+        $0 ~ ("LBA Format[[:space:]]+" idx "[[:space:]]*:") { print; exit }
+    ')"
+    if [[ -z "$line" ]]; then
+        die "NVMe ${ns} has no LBA format ${lbaf}; refusing to change the sector size"
+    fi
+    size="$(sed -n 's/.*Data Size:[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$line")"
+    if [[ "$size" != 4096 ]]; then
+        die "NVMe ${ns} LBA format ${lbaf} is ${size:-unknown} bytes, not 4096; refusing to format (${line})"
+    fi
+    log INFO "NVMe ${ns} LBA format ${lbaf} is 4096-byte sectors"
+}
+
 # ---------------------------------------------------------------------------
 # Task 1 — NVMe user-data erase
 # ---------------------------------------------------------------------------
@@ -1020,6 +1045,7 @@ task_format_nvme() {
         fi
         if [[ -n "$lbaf" ]]; then
             log WARN "Explicit LBA format ${lbaf} for ${ctrl}; format will change the sector size and erase the namespace"
+            assert_nvme_lbaf_4k "$ctrl" "$lbaf"
             format_args+=(--lbaf="$lbaf")
         fi
         run nvme format "$ctrl" "${format_args[@]}"
@@ -1135,7 +1161,10 @@ task_mkfs() {
 # ---------------------------------------------------------------------------
 task_mount() {
     local host="$1"
-    local boot part_root part_disk1 mnt_root mnt_disk1 layout
+    local boot part_root part_disk1 layout mnt_root mnt_disk1
+    local root_fs disk1_fs
+    local mount_disk2_first=0
+    local part_disk2="" disk2_fs="" mnt_disk2=""
 
     boot="$(host_part_path "$host" 0 1)"
     part_root="$(host_part_path "$host" 0 2)"
@@ -1143,9 +1172,19 @@ task_mount() {
     layout="${HOST_DISK1_LAYOUT[$host]}"
     mnt_root="$INSTALL_ROOT"
     mnt_disk1="${INSTALL_ROOT}${HOST_DISK1_MOUNT[$host]}"
+    root_fs="${HOST_ROOT_FSTYPE[$host]}"
+    disk1_fs="${HOST_DISK1_FSTYPE[$host]}"
 
-    local root_fs="${HOST_ROOT_FSTYPE[$host]}"
-    local disk1_fs="${HOST_DISK1_FSTYPE[$host]}"
+    if host_has_disk2 "$host"; then
+        part_disk2="$(host_part_path "$host" 2 1)"
+        disk2_fs="${HOST_DISK2_FSTYPE[$host]}"
+        mnt_disk2="${INSTALL_ROOT}${HOST_DISK2_MOUNT[$host]}"
+        # A games mount under /home must be created on the home filesystem.
+        # Mounting it first would hide that directory when HOME is mounted.
+        if [[ "${HOST_DISK1_MOUNT[$host]}" == "${HOST_DISK2_MOUNT[$host]}"/* ]]; then
+            mount_disk2_first=1
+        fi
+    fi
 
     log INFO "=== Task 4: Mount filesystems ==="
     log INFO "ROOT=$part_root ($root_fs) -> $mnt_root | disk1 ($layout, $disk1_fs) -> $mnt_disk1"
@@ -1153,14 +1192,19 @@ task_mount() {
     run mkdir -p "$mnt_root"
 
     mount_fs "$root_fs" "$part_root" "$mnt_root"
-    run mkdir -p "$mnt_root/boot" "$mnt_disk1"
+    run mkdir -p "$mnt_root/boot"
     run /usr/bin/mount "$boot" "$mnt_root/boot"
+
+    if ((mount_disk2_first)); then
+        log INFO "disk1 is under disk2; mounting disk2 first ($disk2_fs) -> $mnt_disk2"
+        run mkdir -p "$mnt_disk2"
+        mount_fs "$disk2_fs" "$part_disk2" "$mnt_disk2"
+    fi
+
+    run mkdir -p "$mnt_disk1"
     mount_fs "$disk1_fs" "$part_disk1" "$mnt_disk1"
 
-    if host_has_disk2 "$host"; then
-        local part_disk2 disk2_fs mnt_disk2="${INSTALL_ROOT}${HOST_DISK2_MOUNT[$host]}"
-        part_disk2="$(host_part_path "$host" 2 1)"
-        disk2_fs="${HOST_DISK2_FSTYPE[$host]}"
+    if host_has_disk2 "$host" && ((mount_disk2_first == 0)); then
         log INFO "disk2 ($disk2_fs) -> $mnt_disk2"
         run mkdir -p "$mnt_disk2"
         mount_fs "$disk2_fs" "$part_disk2" "$mnt_disk2"
@@ -1252,14 +1296,29 @@ set_pacman_option() {
 # ---------------------------------------------------------------------------
 # Task 6 — Install base system (pacstrap)
 # ---------------------------------------------------------------------------
+# The static pacstrap list has no microcode package. The live CPU vendor
+# selects it, and the UKI microcode hook embeds that image.
+cpu_microcode_package() {
+    local vendor
+    vendor="$(awk -F: '/^vendor_id/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' /proc/cpuinfo 2>/dev/null || true)"
+    case "$vendor" in
+        GenuineIntel) echo intel-ucode ;;
+        AuthenticAMD) echo amd-ucode ;;
+        *) die "Unknown CPU vendor '${vendor:-unset}'; cannot choose a microcode package" ;;
+    esac
+}
+
 task_pacstrap() {
     local host="$1"
     local kernel="${HOST_KERNEL[$host]}"
     local mcode="${HOST_MCODE[$host]}"
     local mnt="$INSTALL_ROOT"
+    local ucode
+
+    ucode="$(cpu_microcode_package)"
 
     log INFO "=== Task 6: pacstrap base system ==="
-    log INFO "linux${kernel} + host mcode packages"
+    log INFO "linux${kernel} + ${ucode} + host mcode packages"
 
     require_mounted "$mnt"
 
@@ -1270,7 +1329,7 @@ task_pacstrap() {
         extra=($mcode)
     fi
     run /usr/bin/pacstrap -K "$mnt" "${PACSTRAP_BASE_PKGS[@]}" \
-        "${extra[@]}" "linux${kernel}" "linux${kernel}-headers"
+        "${extra[@]}" "$ucode" "linux${kernel}" "linux${kernel}-headers"
 }
 
 # ---------------------------------------------------------------------------
@@ -1545,9 +1604,7 @@ print_post_install_steps() {
     if [[ "$host" == ASTER ]]; then
         echo "  ASTER WiFi connects on this run (deferred during live ISO install)."
     fi
-    if [[ "$host" == ASTER ]]; then
-        echo "  OneDrive does not prompt during this run. After the desktop is up, run:"
-        echo "    ./playbooks/personal/onedrive-auth.sh"
+    if [[ "$host" == ASTER || "$host" == YUGEN ]]; then
         echo "  Log in to the desktop first if you want session-specific theming applied."
     fi
     echo
@@ -1595,7 +1652,7 @@ Options:
 Hosts:
   THEMIS   server (nvme0 BOOT/ROOT, nvme1 DOCKER, nvme2 CACHE=/mnt/cache)
   ASTER    laptop (nvme0 BOOT/ROOT, nvme1 HOME)
-  YUGEN    pc     (nvme0 BOOT/ROOT ext4, nvme1 GAMES=/mnt/games xfs 4Kn, nvme2 HOME xfs 4Kn)
+  YUGEN    pc     (nvme0 BOOT/ROOT ext4, nvme1 GAMES=/home/dvaliente/Games xfs 4Kn, nvme2 HOME xfs 4Kn)
   KVM      vm     (vda BOOT/ROOT, vdb HOME)
 
 If HOST is omitted, detection uses DMI product/board name or hostname.

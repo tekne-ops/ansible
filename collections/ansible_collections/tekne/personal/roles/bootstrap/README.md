@@ -100,7 +100,7 @@ Typical links (customize via `bootstrap_symlinks`): OneDrive/Documents → ~/Doc
 
 ## Example Playbook
 
-Tekne playbooks set `bootstrap_xfce_monitors` from `inventories/host_profiles`. ASTER uses `eDP-1` and `DP-1-1`. YUGEN uses `DP-1`, `DP-2`, and `DP-3`.
+Tekne playbooks set `bootstrap_xfce_monitors` from `inventories/personal/host_vars`. ASTER uses `eDP-1` and `DP-1-1`. YUGEN uses `DP-1`, `DP-2`, and `DP-3`.
 
 ```yaml
 - hosts: localhost

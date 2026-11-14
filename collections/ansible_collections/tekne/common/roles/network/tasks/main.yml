@@ -88,7 +88,7 @@
   tags:
     - network-host
 
-# DNS policy: strict DoT to pinned Quad9/Google resolvers on every host.
+# DNS policy: strict DoT to pinned Cloudflare and AdGuard resolvers on every host.
 - name: Remove superseded network packages
   community.general.pacman:
     name:

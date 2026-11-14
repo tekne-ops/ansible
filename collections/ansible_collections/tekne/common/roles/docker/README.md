@@ -4,7 +4,7 @@ Installs Docker Engine, Docker Compose, and Docker Buildx on Arch. Hosts listed 
 
 Container DNS uses the LAN gateway and Quad9. Containers cannot use the host stub resolver at `127.0.0.53`.
 
-Membership lists are empty unless a play sets them. Tekne playbooks load `inventories/host_profiles/<HOSTNAME>.yml`.
+Membership lists are empty unless a play sets them. Tekne playbooks load `inventories/personal/host_vars/<HOSTNAME>.yml`.
 
 ## Variables
 

@@ -8,7 +8,7 @@
     "themis_binaries_repo": "https://github.com/tekne-ops/binaries.git",
     "themis_binaries_root": "/tmp/binaries",
     "pacstrap_base_packages": [
-      "base", "base-devel", "intel-ucode",
+      "base", "base-devel",
       "linux-firmware", "linux-firmware-broadcom", "linux-firmware-liquidio",
       "linux-firmware-mellanox", "linux-firmware-nfp", "linux-firmware-qlogic",
       "dosfstools", "f2fs-tools", "exfatprogs",
@@ -61,29 +61,9 @@
       "maintenance_inventory": "inventories/personal/hosts.yml",
       "maintenance_tags": ["os", "nftables", "libvirt", "docker-host", "haproxy", "repotekne", "gerbera"],
       "post_install_command": "./playbooks/personal/server.sh",
-      "kernel_cmdline": "kernel.split_lock_mitigate=0 split_lock_detect=off nowatchdog quiet splash vt.global_cursor_default=0 loglevel=2 systemd.show_status=false rd.udev.log_level=2",
+      "kernel_cmdline": "split_lock_detect=off nowatchdog quiet splash vt.global_cursor_default=0 loglevel=2 systemd.show_status=false rd.udev.log_level=2",
       "efi_extra": "",
-      "efi_intel": " enable_guc=3 intel_pstate=passive",
-      "additional_repositories": [],
-      "custom_repositories": [
-        {
-          "name": "local-repo",
-          "url": "file:///tmp/binaries/themis",
-          "sign_check": "Optional",
-          "sign_option": "TrustAll"
-        },
-        {
-          "name": "tekne",
-          "url": "http://repo.tekne.sv/$arch",
-          "sign_check": "Optional",
-          "sign_option": "TrustAll"
-        }
-      ],
-      "services": [
-        "sshd.service",
-        "systemd-networkd.service",
-        "systemd-resolved.service"
-      ]
+      "efi_intel": " enable_guc=3 intel_pstate=passive"
     },
     "ASTER": {
       "role": "laptop",
@@ -105,28 +85,11 @@
       "chroot_ansible_tags": ["user", "network-host", "xfce4", "gpu"],
       "maintenance_playbook": "playbooks/personal/workstation.yml",
       "maintenance_inventory": "inventories/personal/hosts.yml",
-      "maintenance_tags": ["network-host", "os", "gpu", "pipewire", "gaming", "onedrive", "xfce4", "bootstrap", "nftables"],
+      "maintenance_tags": ["network-host", "os", "gpu", "pipewire", "gaming", "xfce4", "bootstrap", "nftables"],
       "post_install_command": "./playbooks/personal/workstation.sh",
-      "kernel_cmdline": "kernel.split_lock_mitigate=0 split_lock_detect=off nowatchdog mitigations=off nvidia_drm.modeset=1 quiet splash vt.global_cursor_default=0 loglevel=2 systemd.show_status=false rd.udev.log_level=2",
+      "kernel_cmdline": "split_lock_detect=off nowatchdog mitigations=off nvidia_drm.modeset=1 quiet splash vt.global_cursor_default=0 loglevel=2 systemd.show_status=false rd.udev.log_level=2",
       "efi_extra": " mt7925e.disable_aspm=1",
-      "efi_intel": "",
-      "additional_repositories": ["multilib"],
-      "custom_repositories": [
-        {
-          "name": "tekne",
-          "url": "http://repo.tekne.sv/$arch",
-          "sign_check": "Optional",
-          "sign_option": "TrustAll"
-        }
-      ],
-      "services": [
-        "systemd-networkd.service",
-        "systemd-resolved.service",
-        "iwd.service",
-        "bluetooth.service",
-        "thermald.service",
-        "tlp.service"
-      ]
+      "efi_intel": ""
     },
     "YUGEN": {
       "role": "pc",
@@ -136,7 +99,7 @@
       "storage_kind": "nvme",
       "root_fstype": "ext4",
       "disk1_layout": "games",
-      "disk1_mount": "/mnt/games",
+      "disk1_mount": "/home/dvaliente/Games",
       "disk1_fstype": "xfs",
       "disk1_start_mib": 1,
       "disk1_lbaf": 1,
@@ -153,22 +116,9 @@
       "maintenance_inventory": "inventories/personal/hosts.yml",
       "maintenance_tags": ["network-host", "os", "gpu", "pipewire", "gaming", "xfce4", "docker-host", "libvirt", "bootstrap", "nftables"],
       "post_install_command": "./playbooks/personal/workstation.sh",
-      "kernel_cmdline": "kernel.split_lock_mitigate=0 split_lock_detect=off nowatchdog mitigations=off nvidia_drm.modeset=1 quiet splash vt.global_cursor_default=0 loglevel=2 systemd.show_status=false rd.udev.log_level=2",
+      "kernel_cmdline": "split_lock_detect=off nowatchdog mitigations=off nvidia_drm.modeset=1 nvme_core.default_ps_max_latency_us=0 quiet splash vt.global_cursor_default=0 loglevel=2 systemd.show_status=false rd.udev.log_level=2",
       "efi_extra": "",
-      "efi_intel": "",
-      "additional_repositories": ["multilib"],
-      "custom_repositories": [
-        {
-          "name": "tekne",
-          "url": "http://repo.tekne.sv/$arch",
-          "sign_check": "Optional",
-          "sign_option": "TrustAll"
-        }
-      ],
-      "services": [
-        "systemd-networkd.service",
-        "systemd-resolved.service"
-      ]
+      "efi_intel": ""
     },
     "KVM": {
       "role": "vm",
@@ -186,22 +136,9 @@
       "maintenance_inventory": "inventories/personal/hosts.yml",
       "maintenance_tags": ["network-host", "os", "pipewire", "nftables"],
       "post_install_command": "./playbooks/personal/workstation.sh",
-      "kernel_cmdline": "kernel.split_lock_mitigate=0 split_lock_detect=off nowatchdog quiet splash vt.global_cursor_default=0 loglevel=2 systemd.show_status=false rd.udev.log_level=2",
+      "kernel_cmdline": "split_lock_detect=off nowatchdog quiet splash vt.global_cursor_default=0 loglevel=2 systemd.show_status=false rd.udev.log_level=2",
       "efi_extra": "",
-      "efi_intel": " enable_guc=3 intel_pstate=passive",
-      "additional_repositories": ["multilib"],
-      "custom_repositories": [
-        {
-          "name": "tekne",
-          "url": "http://repo.tekne.sv/$arch",
-          "sign_check": "Optional",
-          "sign_option": "TrustAll"
-        }
-      ],
-      "services": [
-        "systemd-networkd.service",
-        "systemd-resolved.service"
-      ]
+      "efi_intel": " enable_guc=3 intel_pstate=passive"
     }
   }
 }

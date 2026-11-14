@@ -52,8 +52,67 @@
     - packages
     - verify
 
+- name: Skip OneDrive installation and configuration
+  ansible.builtin.debug:
+    msg: "OneDrive installation and configuration are disabled on {{ hostname }}."
+  when: hostname | upper not in (onedrive_hosts | default([]))
+  tags: [bootstrap, onedrive]
+
 - name: Include OneDrive sync tasks
   ansible.builtin.import_tasks: onedrive_sync.yml
+  when: hostname | upper in (onedrive_hosts | default([]))
+  tags: [bootstrap, onedrive]
+
+- name: Remove OneDrive session startup files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ bootstrap_home }}/.config/autostart/onedrive-desktop-start.desktop"
+    - "{{ bootstrap_home }}/bin/onedrive-desktop-start"
+  when: hostname | upper not in (onedrive_hosts | default([]))
+  tags: [bootstrap, onedrive]
+
+- name: Check whether the OneDrive user unit is installed
+  ansible.builtin.stat:
+    path: /usr/lib/systemd/user/onedrive.service
+  register: bootstrap_onedrive_unit
+  when: hostname | upper not in (onedrive_hosts | default([]))
+  tags: [bootstrap, onedrive]
+
+- name: Look up the bootstrap user before stopping OneDrive
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ bootstrap_user }}"
+  when:
+    - hostname | upper not in (onedrive_hosts | default([]))
+    - bootstrap_onedrive_unit.stat.exists | default(false)
+  tags: [bootstrap, onedrive]
+
+- name: Check for a user session before stopping OneDrive
+  ansible.builtin.stat:
+    path: "/run/user/{{ (ansible_facts.getent_passwd | default({})).get(bootstrap_user, ['', '0'])[1] }}/bus"
+  register: bootstrap_onedrive_session
+  when:
+    - hostname | upper not in (onedrive_hosts | default([]))
+    - bootstrap_onedrive_unit.stat.exists | default(false)
+  tags: [bootstrap, onedrive]
+
+- name: Stop the OneDrive user service
+  become: true
+  become_user: "{{ bootstrap_user }}"
+  ansible.builtin.systemd:
+    name: onedrive.service
+    state: stopped
+    enabled: false
+    scope: user
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ (ansible_facts.getent_passwd | default({})).get(bootstrap_user, ['', '0'])[1] }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ (ansible_facts.getent_passwd | default({})).get(bootstrap_user, ['', '0'])[1] }}/bus"
+  when:
+    - hostname | upper not in (onedrive_hosts | default([]))
+    - bootstrap_onedrive_unit.stat.exists | default(false)
+    - bootstrap_onedrive_session.stat.exists | default(false)
   tags: [bootstrap, onedrive]
 
 - name: Include symlink tasks

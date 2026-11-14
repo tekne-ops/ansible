@@ -14,6 +14,7 @@
   loop: "{{ bootstrap_symlinks }}"
   loop_control:
     label: "{{ item.dest | dirname }}"
+  when: hostname | upper in (onedrive_hosts | default([]))
   tags: [bootstrap, symlinks]
 
 - name: Check if symlink sources exist
@@ -25,6 +26,7 @@
   loop_control:
     label: "{{ item.src | basename }}"
   register: bootstrap_symlink_sources
+  when: hostname | upper in (onedrive_hosts | default([]))
   tags: [bootstrap, symlinks]
 
 - name: Create symbolic links (only if source exists)
@@ -39,7 +41,9 @@
   loop: "{{ bootstrap_symlink_sources.results }}"
   loop_control:
     label: "{{ item.item.dest | basename }}"
-  when: item.stat.exists
+  when:
+    - hostname | upper in (onedrive_hosts | default([]))
+    - item.stat.exists
   tags: [bootstrap, symlinks]
 
 - name: Warn about missing symlink sources
@@ -48,8 +52,16 @@
   loop: "{{ bootstrap_symlink_sources.results }}"
   loop_control:
     label: "{{ item.item.src | basename }}"
-  when: not item.stat.exists
+  when:
+    - hostname | upper in (onedrive_hosts | default([]))
+    - not item.stat.exists
   tags: [bootstrap, symlinks]
+
+- name: Check whether Cursor restore is installed
+  ansible.builtin.stat:
+    path: "{{ bootstrap_cursor_restore }}"
+  register: bootstrap_cursor_restore_bin
+  tags: [bootstrap, symlinks, cursor]
 
 - name: Restore Cursor configuration
   become: true
@@ -57,6 +69,13 @@
   ansible.builtin.command:
     cmd: "{{ bootstrap_cursor_restore }}"
   changed_when: true
+  when: bootstrap_cursor_restore_bin.stat.exists
+  tags: [bootstrap, symlinks, cursor]
+
+- name: Skip Cursor restore until the tekne bash checkout exists
+  ansible.builtin.debug:
+    msg: "Skipping Cursor restore; {{ bootstrap_cursor_restore }} is not installed."
+  when: not bootstrap_cursor_restore_bin.stat.exists
   tags: [bootstrap, symlinks, cursor]
 
 # ============================================
@@ -103,4 +122,5 @@
       - >-
         Skipped (source missing):
         {{ bootstrap_symlink_sources.results | rejectattr('stat.exists') | list | length }}
+  when: hostname | upper in (onedrive_hosts | default([]))
   tags: [bootstrap, symlinks]

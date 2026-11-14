@@ -1,6 +1,9 @@
 ---
 # User configuration
 bootstrap_user: dvaliente
+
+# Same list as tekne.personal.onedrive. Empty skips sync, autostart, and OneDrive home links.
+onedrive_hosts: []
 bootstrap_group: users
 bootstrap_home: "/home/{{ bootstrap_user }}"
 

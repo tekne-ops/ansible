@@ -1,24 +1,28 @@
 #!/bin/bash
+set -euo pipefail
 
-if [ $# -ge 1 ]; then
-    game="$(command -v "$1")" || {
-        echo "not found: $1" >&2
-        exit 1
-    }
-    openbox="$(command -v openbox)" || {
-        echo "openbox is not installed" >&2
-        exit 1
-    }
-    gamemoderun="$(command -v gamemoderun)" || {
-        echo "gamemoderun is not installed" >&2
-        exit 1
-    }
-    tmpgame="/tmp/tmpgame.sh"
-    printf '%s &\n%s %s\n' "$openbox" "$gamemoderun" "$game" > "$tmpgame"
-    chmod 755 "$tmpgame"
-    echo "starting ${game}"
-    xinit "$tmpgame" -- :1 -xf86config /etc/X11/xorg.conf.d/20-yugen-nvidia.conf vt"${XDG_VTNR}" || exit 1
-else
+if [[ $# -lt 1 ]]; then
     echo "not a valid argument" >&2
     exit 1
 fi
+
+game="$(command -v "$1")" || {
+    echo "not found: $1" >&2
+    exit 1
+}
+openbox="$(command -v openbox)" || {
+    echo "openbox is not installed" >&2
+    exit 1
+}
+gamemoderun="$(command -v gamemoderun)" || {
+    echo "gamemoderun is not installed" >&2
+    exit 1
+}
+
+tmpgame="$(mktemp)"
+chmod 755 "$tmpgame"
+trap 'rm -f "$tmpgame"' EXIT
+printf '#!/bin/bash\n%s &\n%s %s\n' "$openbox" "$gamemoderun" "$game" >"$tmpgame"
+
+echo "starting ${game}"
+xinit "$tmpgame" -- :1 -xf86config /etc/X11/yugen-game.conf "vt${XDG_VTNR:?set XDG_VTNR}"

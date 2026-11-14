@@ -5,6 +5,12 @@ argument_specs:
     description:
       - Installs the abraunegg OneDrive client and its configuration.
     options:
+      onedrive_hosts:
+        description: Hostnames that install and configure OneDrive. Empty disables the role.
+        required: false
+        type: list
+        elements: str
+        default: []
       onedrive_package:
         description: The package value for the onedrive role.
         required: false

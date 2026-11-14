@@ -8,7 +8,7 @@ Installs nftables and writes `/etc/nftables.conf` from one of three policies:
 
 Server and Docker policies allow the ICMPv6 types SLAAC needs and DHCPv6 replies. The workstation policy allows DHCPv6 replies. During the Arch install chroot the service is enabled and left stopped.
 
-Membership lists are empty unless a play sets them. Tekne playbooks load `inventories/host_profiles/<HOSTNAME>.yml`.
+Membership lists are empty unless a play sets them. Tekne playbooks load `inventories/personal/host_vars/<HOSTNAME>.yml`.
 
 ## Variables
 

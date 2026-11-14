@@ -2,7 +2,7 @@
 ---
 nftables_hostname: "{{ hostname | default(ansible_facts['hostname']) | upper }}"
 
-# Membership comes from inventories/host_profiles.
+# Membership comes from inventories/personal/host_vars.
 nftables_server_hosts: []
 nftables_docker_hosts: []
 

@@ -70,7 +70,7 @@ xfce4_acpi_user: dvaliente
 xfce4_acpi_hosts: []
 
 # Hosts that receive LightDM packages, greeter config, and backgrounds.
-# Membership comes from inventories/host_profiles.
+# Membership comes from inventories/personal/host_vars.
 xfce4_lightdm_hosts: []
 
 # LightDM service name

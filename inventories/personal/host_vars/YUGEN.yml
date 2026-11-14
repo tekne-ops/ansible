@@ -25,6 +25,7 @@ gaming_xorg_hosts:
   - YUGEN
 gaming_library_hosts:
   - YUGEN
+gaming_library_path: /home/dvaliente/Games
 docker_daemon_json_hosts:
   - YUGEN
 nftables_server_hosts: []
@@ -34,3 +35,5 @@ bootstrap_xfce_monitors:
   - DP-1
   - DP-2
   - DP-3
+# OneDrive install, sync, autostart, and home links stay off.
+onedrive_hosts: []

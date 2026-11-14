@@ -96,7 +96,7 @@ argument_specs:
         default: true
       network_dns_from_dhcp:
         description:
-          - When false (default on every host), pin Quad9 then Google and ignore DHCP DNS.
+          - When false (default on every host), pin Cloudflare for Families then AdGuard and ignore DHCP DNS.
           - Cablecolor/Tigo drop much of port 53; Tigo blocks 1.1.1.1:853.
         required: false
         type: bool

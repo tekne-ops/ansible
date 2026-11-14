@@ -23,6 +23,22 @@ argument_specs:
           - lib32-gamemode
           - proton-ge-custom-bin
           - noto-fonts-cjk
+          - mangohud
+          - lib32-mangohud
+          - gamescope
+      gaming_environment:
+        description: Variables written to /etc/environment and /etc/profile.d for gaming hosts.
+        required: false
+        type: list
+        elements: dict
+        default:
+          - { key: WINEFSYNC, value: "1" }
+          - { key: WINEESYNC, value: "1" }
+          - { key: WINENTSYNC, value: "1" }
+          - { key: PROTON_ENABLE_NVAPI, value: "1" }
+          - { key: __GL_SHADER_DISK_CACHE, value: "1" }
+          - { key: __GL_SHADER_DISK_CACHE_SKIP_CLEANUP, value: "1" }
+          - { key: __GL_SHADER_DISK_CACHE_SIZE, value: "10737418240" }
       gaming_hosts:
         description: Hostnames that receive gaming packages and limits.
         required: false
@@ -30,7 +46,7 @@ argument_specs:
         elements: str
         default: []
       gaming_xorg_hosts:
-        description: Hostnames that receive the NVIDIA Xorg drop-in.
+        description: Hostnames that receive the NVIDIA game-session Xorg config.
         required: false
         type: list
         elements: str
@@ -47,7 +63,12 @@ argument_specs:
         elements: str
         default: []
       gaming_xorg_conf_dest:
-        description: The xorg conf dest value for the gaming role.
+        description: NVIDIA game-session Xorg config. The game script passes this path to -xf86config.
+        required: false
+        type: str
+        default: /etc/X11/yugen-game.conf
+      gaming_xorg_conf_legacy_dest:
+        description: Previous drop-in path. Removed so the desktop session is not pinned to one output.
         required: false
         type: str
         default: /etc/X11/xorg.conf.d/20-yugen-nvidia.conf

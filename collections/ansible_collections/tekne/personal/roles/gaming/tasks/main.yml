@@ -82,6 +82,15 @@
     - gaming
     - config
 
+- name: Remove the NVIDIA game config from the global Xorg drop-in directory
+  ansible.builtin.file:
+    path: "{{ gaming_xorg_conf_legacy_dest }}"
+    state: absent
+  when: gaming_effective_hostname in gaming_xorg_hosts
+  tags:
+    - gaming
+    - config
+
 - name: Install gaming limits configuration
   ansible.builtin.copy:
     src: gaming-limits.conf
@@ -155,6 +164,18 @@
     - gaming
     - config
 
+- name: Warn when the running kernel has no ntsync module
+  ansible.builtin.debug:
+    msg: >-
+      ntsync is not available in the running kernel.
+      /etc/modules-load.d/ntsync.conf will load it after a reboot onto a kernel that ships it.
+  when:
+    - gaming_effective_hostname in gaming_hosts
+    - gaming_ntsync_available.rc | default(0) != 0
+  tags:
+    - gaming
+    - config
+
 - name: Load the ntsync module
   community.general.modprobe:
     name: ntsync
@@ -215,6 +236,37 @@
     groups: gamemode
     append: true
   loop: "{{ gaming_gamemode_users }}"
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Publish gaming performance variables to desktop sessions
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    regexp: '^{{ item.key }}='
+    line: '{{ item.key }}={{ item.value }}'
+    create: true
+    mode: '0644'
+  loop: "{{ gaming_environment }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: gaming_effective_hostname in gaming_hosts
+  tags:
+    - gaming
+    - config
+
+- name: Publish gaming performance variables to login shells
+  ansible.builtin.copy:
+    dest: /etc/profile.d/gaming-performance.sh
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Managed by tekne.personal.gaming
+      {% for item in gaming_environment %}
+      export {{ item.key }}={{ item.value }}
+      {% endfor %}
   when: gaming_effective_hostname in gaming_hosts
   tags:
     - gaming

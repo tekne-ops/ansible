@@ -4,10 +4,11 @@ Installs gaming packages (Steam, Lutris, Wine, etc.) and configures a game launc
 
 ## What It Does
 
-1. **Installs gaming packages** (19 packages including Steam, Lutris, Wine, fonts)
-2. **Copies game.conf** to `/etc/security/limits.d/` (X configuration for gaming)
-3. **Copies game script** to `/usr/local/bin/` (executable game launcher)
-4. **Verifies installation** of all packages and files
+1. **Installs gaming packages** (Steam, Lutris, Wine, gamemode, MangoHud, gamescope)
+2. **On `gaming_xorg_hosts`** copies the NVIDIA game-session config to `/etc/X11/yugen-game.conf` and removes the old `/etc/X11/xorg.conf.d/20-yugen-nvidia.conf` drop-in
+3. **Copies** limits, schedtoold, gamemode, ntsync, and `/usr/local/bin/game`
+4. **Publishes** Wine, NTSync, NVAPI, and the NVIDIA shader-cache variables to `/etc/environment` and `/etc/profile.d/gaming-performance.sh`
+5. **Verifies** packages and deployed files
 
 ## Requirements
 
@@ -22,32 +23,30 @@ ansible-galaxy collection install community.general
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `gaming_packages` | See defaults | List of gaming packages |
-| `gaming_limits_conf_dest` | `/etc/security/limits.d/game.conf` | Destination for X config |
-| `gaming_script_dest` | `/usr/local/bin/game` | Destination for game script |
+| `gaming_xorg_conf_dest` | `/etc/X11/yugen-game.conf` | Game-session Xorg config, passed to `-xf86config` |
+| `gaming_limits_conf_dest` | `/etc/security/limits.d/gaming.conf` | `@audio` and `@gamemode` limits |
+| `gaming_script_dest` | `/usr/local/bin/game` | Dedicated X session launcher |
+| `gaming_environment` | See defaults | Wine, NTSync, NVAPI, and shader-cache variables |
 
 ### Packages Installed
 
-**Game Launchers:**
-- lutris, heroic-games-launcher, steam
+**Game launchers:** lutris, steam, gamescope
 
-**Wine Stack:**
-- wine-tkg-clean-staging-git, winetricks, wine-gecko, wine-mono
+**Wine stack:** wine-tkg-valve-exp-bleeding, winetricks, wine-gecko, wine-mono, proton-ge-custom-bin
 
-**Proton/Gaming:**
-- gamemode, proton-ge-custom-bin, openbox
+**Session and overlays:** openbox, gamemode, lib32-gamemode, mangohud, lib32-mangohud
 
-**Fonts:**
-- noto-fonts-cjk (other fonts come from pacstrap_base_packages)
-
-**Libraries:**
-- lib32-systemd, lib32-gst-plugins-base, lib32-gst-plugins-good, lib32-pcsclite
+**Fonts and libraries:** noto-fonts-cjk, lib32-systemd
 
 ## Files Deployed
 
 | Source | Destination | Mode |
 |--------|-------------|------|
-| `files/game.conf` | `/etc/security/limits.d/game.conf` | 0644 |
+| `files/game.conf` | `/etc/X11/yugen-game.conf` | 0644 |
+| `files/gaming-limits.conf` | `/etc/security/limits.d/gaming.conf` | 0644 |
 | `files/game` | `/usr/local/bin/game` | 0755 |
+| `files/gamemode.ini` | `/etc/gamemode.ini` | 0644 |
+| `files/schedtoold.conf` | `/etc/schedtoold.conf` | 0644 |
 
 ## Game Script Usage
 

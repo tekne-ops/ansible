@@ -58,7 +58,7 @@ class InstallProfilesTest(unittest.TestCase):
         self.assertIn("HOST_DISK1_START_MIB", output)
         self.assertIn("HOST_DISK1_MOUNT", output)
         self.assertIn("[ASTER]=1", output)
-        self.assertIn("[YUGEN]=/mnt/games", output)
+        self.assertIn("[YUGEN]=/home/dvaliente/Games", output)
         self.assertIn("HOST_ROOT_FSTYPE", output)
         self.assertIn("HOST_DISK1_FSTYPE", output)
         self.assertIn("HOST_DISK2_FSTYPE", output)
@@ -73,6 +73,19 @@ class InstallProfilesTest(unittest.TestCase):
         self.assertIn("declare -gA HOST_DISK1_LBAF=(\n  [YUGEN]=1\n)", output)
         self.assertIn("declare -gA HOST_DISK2_LBAF=(\n  [YUGEN]=1\n)", output)
         self.assertIn("declare -gA HOST_DISK1_START_MIB=(\n  [ASTER]=1\n  [KVM]=1\n  [THEMIS]=0\n  [YUGEN]=1\n)", output)
+
+    def test_yugen_install_policy(self) -> None:
+        yugen = self.data["hosts"]["YUGEN"]
+        self.assertIn("nvme_core.default_ps_max_latency_us=0", yugen["kernel_cmdline"])
+        self.assertIn("mitigations=off", yugen["kernel_cmdline"])
+        self.assertNotIn("onedrive", yugen["maintenance_tags"])
+        self.assertNotIn("onedrive", self.data["hosts"]["ASTER"]["maintenance_tags"])
+        self.assertNotIn("intel-ucode", self.data["global"]["pacstrap_base_packages"])
+        for profile in self.data["hosts"].values():
+            self.assertNotIn("kernel.split_lock_mitigate", profile["kernel_cmdline"])
+            self.assertNotIn("custom_repositories", profile)
+            self.assertNotIn("additional_repositories", profile)
+            self.assertNotIn("services", profile)
 
     def test_lbaf_stays_unset_until_a_profile_opts_in(self) -> None:
         data = load_profiles()

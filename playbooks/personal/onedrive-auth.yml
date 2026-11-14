@@ -1,5 +1,7 @@
 ---
 # One-time Microsoft device login. Normal workstation convergence does not pause.
+# ASTER and YUGEN set onedrive_hosts to an empty list, so this play does not
+# install or configure OneDrive on those hosts.
 #
 #   ansible-playbook playbooks/personal/onedrive-auth.yml -i inventories/personal/hosts.yml --ask-vault-pass
 
@@ -36,4 +38,5 @@
       ansible.builtin.import_role:
         name: tekne.personal.bootstrap
         tasks_from: onedrive_sync.yml
+      when: hostname | upper in (onedrive_hosts | default([]))
       tags: [onedrive, bootstrap]

@@ -10,9 +10,9 @@
 # This host uses DHCP nameservers (no DNS= pin). systemd-networkd UseDNS=yes
 # plus DNSDefaultRoute=yes feed those IPs into resolved; they still go via DoT.
 {% else -%}
-# Pinned DoT resolvers (not DHCP or IPv6 RA). Cablecolor drops much of port 53;
-# Tigo blocks Cloudflare DoT — Quad9 then Google. Each address is IP#hostname
-# so the certificate can be checked against a DNS name.
+# Pinned DoT resolvers (not DHCP or IPv6 RA). Bare addresses: Cloudflare for
+# Families (1.1.1.3), then AdGuard (94.140.14.14, 94.140.15.15).
+# Tigo blocks 1.1.1.1:853.
 {% endif %}
 [Resolve]
 {% set _dns_domains = (network_dns_search_domains | default([])) + (network_dns_route_domains | default([])) -%}

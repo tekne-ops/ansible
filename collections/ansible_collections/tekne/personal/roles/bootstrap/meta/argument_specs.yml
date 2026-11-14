@@ -5,6 +5,12 @@ argument_specs:
     description:
       - Installs post-install packages and applies OneDrive, Bluetooth, and XFCE desktop settings.
     options:
+      onedrive_hosts:
+        description: Hostnames that install and configure OneDrive. Empty skips sync, autostart, and OneDrive home links.
+        required: false
+        type: list
+        elements: str
+        default: []
       bootstrap_user:
         description: User configuration.
         required: false

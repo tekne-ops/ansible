@@ -95,6 +95,104 @@
     - nvidia
     - packages
 
+- name: Check discrete NVIDIA power-management units
+  ansible.builtin.stat:
+    path: "/usr/lib/systemd/system/{{ item }}"
+  loop:
+    - nvidia-persistenced.service
+    - nvidia-suspend.service
+    - nvidia-hibernate.service
+    - nvidia-resume.service
+  register: gpu_nvidia_units
+  when: gpu_type == 'nvidia'
+  tags:
+    - gpu
+    - nvidia
+    - config
+
+- name: Decide whether NVIDIA can preserve video memory across suspend
+  ansible.builtin.set_fact:
+    gpu_nvidia_preserve_memory: >-
+      {{
+        gpu_nvidia_units.results | default([])
+        | selectattr('item', 'in', ['nvidia-suspend.service', 'nvidia-hibernate.service', 'nvidia-resume.service'])
+        | selectattr('stat.exists')
+        | list | length == 3
+      }}
+  when: gpu_type == 'nvidia'
+  tags:
+    - gpu
+    - nvidia
+    - config
+
+- name: Set discrete NVIDIA module options
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/nvidia.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Managed by tekne.personal.gpu
+      options nvidia NVreg_UsePageAttributeTable=1{% if gpu_nvidia_preserve_memory | default(false) | bool %} NVreg_PreserveVideoMemoryAllocations=1{% endif %}
+
+  when: gpu_type == 'nvidia'
+  tags:
+    - gpu
+    - nvidia
+    - config
+
+- name: Warn when NVIDIA suspend units are not installed
+  ansible.builtin.debug:
+    msg: >-
+      nvidia-suspend, nvidia-hibernate, or nvidia-resume is missing.
+      Video-memory preservation stays off so suspend does not depend on units this driver does not ship.
+  when:
+    - gpu_type == 'nvidia'
+    - not (gpu_nvidia_preserve_memory | default(false) | bool)
+  tags:
+    - gpu
+    - nvidia
+    - config
+
+- name: Enable NVIDIA suspend and resume units
+  ansible.builtin.systemd:
+    name: "{{ item.item }}"
+    enabled: true
+  loop: "{{ gpu_nvidia_units.results | default([]) }}"
+  when:
+    - gpu_type == 'nvidia'
+    - item.item != 'nvidia-persistenced.service'
+    - item.stat.exists | default(false)
+    - gpu_nvidia_preserve_memory | default(false) | bool
+  tags:
+    - gpu
+    - nvidia
+    - config
+
+- name: Enable nvidia-persistenced
+  ansible.builtin.systemd:
+    name: nvidia-persistenced.service
+    enabled: true
+    state: "{{ 'stopped' if gpu_install_chroot_phase | bool else 'started' }}"
+  when:
+    - gpu_type == 'nvidia'
+    - gpu_nvidia_units.results | default([]) | selectattr('item', 'equalto', 'nvidia-persistenced.service') | selectattr('stat.exists') | list | length == 1
+  tags:
+    - gpu
+    - nvidia
+    - config
+
+- name: Warn when nvidia-persistenced is not installed
+  ansible.builtin.debug:
+    msg: "nvidia-persistenced.service is not installed; GPU persistence mode stays off."
+  when:
+    - gpu_type == 'nvidia'
+    - gpu_nvidia_units.results | default([]) | selectattr('item', 'equalto', 'nvidia-persistenced.service') | selectattr('stat.exists') | list | length == 0
+  tags:
+    - gpu
+    - nvidia
+    - config
+
 # =============================================================================
 # Intel/Mesa Installation (THEMIS, KVM, ASTER hybrid)
 # =============================================================================
